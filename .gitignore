@@ -1,0 +1,73 @@
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Compiled source
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.a
+*.obj
+*.lib
+*.out
+*.elf
+
+# Logs and databases
+*.log
+*.tlog
+*.vlog
+*.cache
+*.db
+*.opendb
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+
+# C/C++ specific
+*.pdb
+*.idb
+*.ilk
+
+# Other IDE files
+*.swp
+*.swo
+
+# Backup files
+*~
+*.bak
+*.tmp
+*.temp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Ignore generated executables
+*.exe
+*.pdb
+*.manifest
+
+# Ignore receiver / sender build artifacts
+receiver/**/Debug/
+receiver/**/Release/
+sender/**/Debug/
+sender/**/Release/
+
