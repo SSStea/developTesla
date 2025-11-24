@@ -583,7 +583,7 @@ void Samd_DSeqAgg(const vector<string>& vecMACs, vector<string>& vecTauOut)
 {
     EnsureSamdGtMatrix();
 
-    int N = (int)vecMACs.size() - 1;
+    int N = (int)vecMACs.size();
     int u = g_SamdKSGt.u;
 
     vecTauOut.clear();
@@ -629,6 +629,8 @@ int main() {
     int nCount = 0;
     vector<string> vecWaitForDSeqAgg;
     vector<string> vecTau;
+    vector<string> vecMac;
+
 
     vector<string> One_Way_Chain = vec_strGenerateKeyChain(strTESLAInitKey);//√‹‘ø¡¥
     strKey0 = One_Way_Chain[0];
@@ -672,6 +674,7 @@ int main() {
 
             strKeyObeject = One_Way_Chain[i];
             strMessageMAC = strComputeMAC(strSendmessage + to_string(i), strKeyObeject, strContext + to_string(i));
+            vecMac.push_back(strMessageMAC);
             vecWaitForDSeqAgg.push_back(strMessageMAC);
             nCount++;
 
