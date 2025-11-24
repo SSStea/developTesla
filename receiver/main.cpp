@@ -1,4 +1,4 @@
-#include <iostream>
+ï»¿#include <iostream>
 #include <random>
 #include <vector>
 #include <iomanip>
@@ -19,7 +19,7 @@
 #include <functional>
 #include <condition_variable>
 #include <atomic>
-// ÊÇ·ñÆôÓÃÏß³Ì»¯½ÓÊÕ£¨0 = Ô­ÓĞ while/recv Âß¼­£»1 = ÆôÓÃ¼àÌıÏß³Ì + Ïß³Ì³Ø£©
+// æ˜¯å¦å¯ç”¨çº¿ç¨‹åŒ–æ¥æ”¶ï¼ˆ0 = åŸæœ‰ while/recv é€»è¾‘ï¼›1 = å¯ç”¨ç›‘å¬çº¿ç¨‹ + çº¿ç¨‹æ± ï¼‰
 #ifndef USE_THREADED_RECEIVER
 #define USE_THREADED_RECEIVER 1
 #endif
@@ -50,31 +50,35 @@ typedef SSIZE_T ssize_t;
 
 using namespace std;
 using json = nlohmann::json;
-const int N_BASE_SLOT = 1; // TESLA ±¨ÎÄ´Ó 1 ¿ªÊ¼±àºÅ
-const int N_GROUP_SIZE = 10;
+const int N_BASE_SLOT = 1; // TESLA æŠ¥æ–‡ä» 1 å¼€å§‹ç¼–å·
+const int N_GROUP_SIZE = 100;
+const int N_DECTECING = 1;
 
-// ===== ADDED: Ã¿¸ö sender ¶ÀÁ¢µÄ½ÓÊÕ¶ËÉÏÏÂÎÄ =====
+// ===== ADDED: æ¯ä¸ª sender ç‹¬ç«‹çš„æ¥æ”¶ç«¯ä¸Šä¸‹æ–‡ =====
 struct SReceiverContext {
-    // TESLA ²ÎÊı
+    // TESLA å‚æ•°
     string strKey0;          // K0
     int nTotalKeys = 0;           // N
     int nDelay = 0;               // d
     int nIntervalLengthMs = 0;    // Tint
-    long long lDeltaMs = 0;       // ¹À¼ÆµÄÊ±¼äÆ«ÒÆ¦¤
-    string strContext;       // F' µÄÉÏÏÂÎÄ
+    long long lDeltaMs = 0;       // ä¼°è®¡çš„æ—¶é—´åç§»Î”
+    string strContext;       // F' çš„ä¸Šä¸‹æ–‡
 
-    // »º³åÓëÍ³¼Æ
+    // ç¼“å†²ä¸ç»Ÿè®¡
     vector<string> vecReceiveMessageBuffer;     // receiveMessageBuffer
-    vector<string> vecReceiveMessageMacBuffer;     // receiveMessageMACBuffer
     vector<string> vecReceiveMessageKeyBuffer;     // receiveMessageKEYBuffer
+    vector<string> vecSamdTau;
+    vector<string> vecRecvMsgWithoutKey;
 
     int nValidKeyCnt = 0;
     int nDelayMemoryKeyCnt = 0;
     bool bIsLostPacket = false;
     int nLastKeyIndex = 0;
     int nGroupCnt = 0;
+    int nRecvTauIndex = 0;
+    int nLastTauIndex = 0;
 
-    // ·Ö×é¾ÛºÏĞèÒªµÄÊ±¼ä´ÁµÈ£¨¿ÉÑ¡£©
+    // åˆ†ç»„èšåˆéœ€è¦çš„æ—¶é—´æˆ³ç­‰ï¼ˆå¯é€‰ï¼‰
     //std::chrono::steady_clock::time_point tpLastTouch = std::chrono::steady_clock::now();
 };
 
@@ -82,25 +86,25 @@ struct TeslaProtocolPacket {
     string strSenderId;
     int nIndex;
     string strMessage;
-    string strMac;
     string strDisclosedKey;
+    vector<string> vecSamdTau;
 
     static TeslaProtocolPacket from_json(const json& j) {
-        return { j["strSenderId"], j["nIndex"], j["strMessage"], j["strMac"], j["strDisclosedKey"] };
+        return { j["strSenderId"], j["nIndex"], j["strMessage"], j["strDisclosedKey"], j["vecSamdTau"]};
     }
 };
 
 struct TeslaInitPacket {
-    string strSenderId;     //·¢ËÍ·½ID
+    string strSenderId;     //å‘é€æ–¹ID
     string strCommitmentKey; //K0
-    string strZeroKey;       //Î´ÅûÂ¶ÃÜÔ¿Ê±µÄÌî³äÃÜÔ¿
+    string strZeroKey;       //æœªæŠ«éœ²å¯†é’¥æ—¶çš„å¡«å……å¯†é’¥
     int nTotalKeys;        //N
-    int nIntervalLengthMs;   //Ê±¼ä¼ä¸ô
-    int nDisclosureDelay;  //ÃÜÔ¿ÅûÂ¶ÑÓ³Ùdelay
-    string strF_Definition;  //ÃÜÔ¿Éú³Éº¯ÊıF£¨sha256£©
-    string strFprime_definition; //ÎªËæ»úº¯ÊıF¡®£¨sha256||context£©
+    int nIntervalLengthMs;   //æ—¶é—´é—´éš”
+    int nDisclosureDelay;  //å¯†é’¥æŠ«éœ²å»¶è¿Ÿdelay
+    string strF_Definition;  //å¯†é’¥ç”Ÿæˆå‡½æ•°Fï¼ˆsha256ï¼‰
+    string strFprime_definition; //ä¸ºéšæœºå‡½æ•°Fâ€˜ï¼ˆsha256||contextï¼‰
     string strContext;
-    long long lSenderTimestamp;//senderµ±Ç°Ê±¼ä
+    long long lSenderTimestamp;//senderå½“å‰æ—¶é—´
 
     static TeslaInitPacket from_json(const json& j) {
         return {
@@ -111,14 +115,14 @@ struct TeslaInitPacket {
     }
 };
 
-// ´®ĞĞÍ¨µÀ£ºÍ¬Ò» sender µÄÈÎÎñÔÚ¸ÃÍ¨µÀÄÚ´®ĞĞÖ´ĞĞ
+// ä¸²è¡Œé€šé“ï¼šåŒä¸€ sender çš„ä»»åŠ¡åœ¨è¯¥é€šé“å†…ä¸²è¡Œæ‰§è¡Œ
 struct SSenderStrand {
-    mutex mtxQ;                                          //»¥³âËø
-    deque<function<void()>> dqTasks;                     //ÈÎÎñ¶ÓÁĞ
-    bool bScheduled = false;                              // ÊÇ·ñÒÑÅÉ·¢µ½Ïß³Ì³ØÖ´ĞĞ
-    atomic<long long> llLastActiveMs{ 0 };             // ×î½ü»î¶¯
-    int nPriority = 0;                                    // ¿ÉÑ¡£ºÓÅÏÈ¼¶
-    size_t nDroppedTasks = 0;                             // ³¬ÏŞ¶ªÆú¼ÆÊı
+    mutex mtxQ;                                          //äº’æ–¥é”
+    deque<function<void()>> dqTasks;                     //ä»»åŠ¡é˜Ÿåˆ—
+    bool bScheduled = false;                              // æ˜¯å¦å·²æ´¾å‘åˆ°çº¿ç¨‹æ± æ‰§è¡Œ
+    atomic<long long> llLastActiveMs{ 0 };             // æœ€è¿‘æ´»åŠ¨
+    int nPriority = 0;                                    // å¯é€‰ï¼šä¼˜å…ˆçº§
+    size_t nDroppedTasks = 0;                             // è¶…é™ä¸¢å¼ƒè®¡æ•°
 };
 
 //fixed-size thread pool
@@ -132,7 +136,7 @@ public:
                 for (;;)
                 {
                     function<void()> fnTask;
-                    {   // È¡ÈÎÎñ
+                    {   // å–ä»»åŠ¡
                         unique_lock<mutex> lk(mtxQ);
                         cvQ.wait(lk, [this] { return bStop || !dqTasks.empty(); });
                         if (bStop && dqTasks.empty())
@@ -142,7 +146,7 @@ public:
                         fnTask = move(dqTasks.front());
                         dqTasks.pop_front();
                     }
-                    // Ö´ĞĞ
+                    // æ‰§è¡Œ
                     try
                     {
                         fnTask();
@@ -190,22 +194,22 @@ long long lEstimateTimeOffset(const TeslaInitPacket& initPkt)
     return delta;
 }
 
-static unordered_map<string, shared_ptr<SSenderStrand>> g_mapStrands; //ËùÓĞÒÑÖªsenderµÄ´®ĞĞÍ¨µÀmap
+static unordered_map<string, shared_ptr<SSenderStrand>> g_mapStrands; //æ‰€æœ‰å·²çŸ¥senderçš„ä¸²è¡Œé€šé“map
 static mutex g_mtxStrands;
 
-static unordered_set<string> g_setKnownSenders; //ÒÑÖªµÄsenderµÄ±í£¬ÒÑ¾­ÊÕµ½¹ı¸ÃsenderµÄinit°üÁË
+static unordered_set<string> g_setKnownSenders; //å·²çŸ¥çš„senderçš„è¡¨ï¼Œå·²ç»æ”¶åˆ°è¿‡è¯¥senderçš„initåŒ…äº†
 static mutex g_mtxKnown;
 
-static unordered_map<string, shared_ptr<SReceiverContext>> g_mapCtx;// ¸ù¾İsender_id´´½¨¸ÃsenderÉÏÏÂÎÄµÄmap
+static unordered_map<string, shared_ptr<SReceiverContext>> g_mapCtx;// æ ¹æ®sender_idåˆ›å»ºè¯¥senderä¸Šä¸‹æ–‡çš„map
 static mutex g_mtxCtx;
 
 static unique_ptr<CThreadPool> g_pThreadPool;
 static atomic<bool> g_bRunning{ false };
-static int g_nWorkerThreads = 10;          //Ïß³Ì³Ø´óĞ¡
-static const size_t N_MAX_STRAND_QUEUE = 2048;  // Ã¿¸ö sender µÄÈÎÎñ¶ÓÁĞÉÏÏŞ
-static const long long LL_IDLE_TTL_MS = 60'000; // ¿ÕÏĞ»ØÊÕãĞÖµ
+static int g_nWorkerThreads = 10;          //çº¿ç¨‹æ± å¤§å°
+static const size_t N_MAX_STRAND_QUEUE = 2048;  // æ¯ä¸ª sender çš„ä»»åŠ¡é˜Ÿåˆ—ä¸Šé™
+static const long long LL_IDLE_TTL_MS = 60'000; // ç©ºé—²å›æ”¶é˜ˆå€¼
 
-// »ñÈ¡»ò´´½¨Ä³ sender µÄÉÏÏÂÎÄ
+// è·å–æˆ–åˆ›å»ºæŸ sender çš„ä¸Šä¸‹æ–‡
 static shared_ptr<SReceiverContext> GetOrCreateCtx(const string& strSenderId) {
     lock_guard<mutex> g(g_mtxCtx);
     auto it = g_mapCtx.find(strSenderId);
@@ -216,38 +220,38 @@ static shared_ptr<SReceiverContext> GetOrCreateCtx(const string& strSenderId) {
 }
 
 /*
-* PostDrainLocked_ ºÍ PostToSender ÊÇ¶à·¢ËÍ¶Ë²¢·¢´¦Àí³¡¾°ÖĞ£¬ÓÃÓÚÈ·±£¡°µ¥·¢ËÍ¶ËÄÚ´®ĞĞÖ´ĞĞ£¬¶à¸ö·¢ËÍ¶Ë¼ä²¢ĞĞÖ´ĞĞ¡±µÄ¹Ø¼ü×é¼ş
-* ÔÚÒ»¸ö½ÓÊÕ¶ËÖĞ£¬Èç¹û¶à¸ö·¢ËÍ¶Ë£¨²»Í¬ sender_id£©·¢ËÍÊı¾İ°üµ½Í¬Ò»½ÓÊÕ¶Ë£º
-        ²»Í¬µÄ sender_id Ó¦¸Ã²¢ĞĞ´¦Àí£¨Ìá¸ßÍÌÍÂ£©¡£
-        Í¬Ò»¸ö sender_id µÄÊı¾İÒª±£Ö¤Ë³Ğò²»ÂÒ£¨±ÜÃâ×´Ì¬»ìÂÒ£©¡£
-  Õâ¾ÍÊÇ ¡°per-sender ´®ĞĞÍ¨µÀ£¨strand£©¡± µÄÉè¼ÆÒâÍ¼£º
-        Õë¶ÔÃ¿¸ö·¢ËÍ¶Ë£¬ÎÒÃÇÉèÁ¢Ò»¸ö¶ÀÁ¢µÄ FIFO ¶ÓÁĞ£¬±£Ö¤ËüµÄÈÎÎñÊÇ´®ĞĞ´¦Àí£»
-        Í¬Ò»Ê±¿Ì£¬²»Í¬ sender µÄÈÎÎñ¿ÉÒÔÔÚ²»Í¬Ïß³ÌÉÏ²¢ĞĞÔËĞĞ¡£
+* PostDrainLocked_ å’Œ PostToSender æ˜¯å¤šå‘é€ç«¯å¹¶å‘å¤„ç†åœºæ™¯ä¸­ï¼Œç”¨äºç¡®ä¿â€œå•å‘é€ç«¯å†…ä¸²è¡Œæ‰§è¡Œï¼Œå¤šä¸ªå‘é€ç«¯é—´å¹¶è¡Œæ‰§è¡Œâ€çš„å…³é”®ç»„ä»¶
+* åœ¨ä¸€ä¸ªæ¥æ”¶ç«¯ä¸­ï¼Œå¦‚æœå¤šä¸ªå‘é€ç«¯ï¼ˆä¸åŒ sender_idï¼‰å‘é€æ•°æ®åŒ…åˆ°åŒä¸€æ¥æ”¶ç«¯ï¼š
+        ä¸åŒçš„ sender_id åº”è¯¥å¹¶è¡Œå¤„ç†ï¼ˆæé«˜ååï¼‰ã€‚
+        åŒä¸€ä¸ª sender_id çš„æ•°æ®è¦ä¿è¯é¡ºåºä¸ä¹±ï¼ˆé¿å…çŠ¶æ€æ··ä¹±ï¼‰ã€‚
+  è¿™å°±æ˜¯ â€œper-sender ä¸²è¡Œé€šé“ï¼ˆstrandï¼‰â€ çš„è®¾è®¡æ„å›¾ï¼š
+        é’ˆå¯¹æ¯ä¸ªå‘é€ç«¯ï¼Œæˆ‘ä»¬è®¾ç«‹ä¸€ä¸ªç‹¬ç«‹çš„ FIFO é˜Ÿåˆ—ï¼Œä¿è¯å®ƒçš„ä»»åŠ¡æ˜¯ä¸²è¡Œå¤„ç†ï¼›
+        åŒä¸€æ—¶åˆ»ï¼Œä¸åŒ sender çš„ä»»åŠ¡å¯ä»¥åœ¨ä¸åŒçº¿ç¨‹ä¸Šå¹¶è¡Œè¿è¡Œã€‚
 
-*PostToSender×÷ÓÃ£º½«Ò»¸öÈÎÎñÍ¶µİµ½¶ÔÓ¦ sender_id µÄÈÎÎñ¶ÓÁĞÖĞ¡£Èç¹û¶ÓÁĞÖ®Ç°ÊÇ¿ÕÇÒÎ´ÔËĞĞ£¬Ôò×Ô¶¯´¥·¢¸Ã¶ÓÁĞÖ´ĞĞ¡£
-*ÏêÏ¸Á÷³Ì£º
-    1¡¢ÕÒµ½»ò´´½¨Ò»¸ö sender µÄ´®ĞĞ¶ÓÁĞ£¨SSenderStrand£©
-        Í¨¹ıÈ«¾Ö g_mapStrands[strSenderId] »ñÈ¡¶ÔÓ¦µÄÉÏÏÂÎÄ£¨°üº¬¶ÓÁĞ¡¢µ÷¶È×´Ì¬µÈ£©¡£
-    2¡¢Ïò¶ÔÓ¦ sender µÄÈÎÎñ¶ÓÁĞÖĞ×·¼ÓÈÎÎñ£¨FIFO£©
-        ËùÓĞÈÎÎñ¶¼ÓÃ std::function<void()> °ü×°£¬¿ÉÒÔ°ó¶¨ÈÎÒâ´úÂë£¨Èç TESLA °ü½âÂë¡¢ÃÜÔ¿ÑéÖ¤µÈ£©¡£
-    3¡¢ÅĞ¶ÏÊÇ·ñĞèÒªµ÷¶ÈÔËĞĞ¶ÓÁĞÈÎÎñ
-        Èç¹û¶ÓÁĞÖ®Ç°ÊÇ¿ÕµÄ£¬ÇÒÕâ¸ö sender µ±Ç°Ã»ÓĞ¹ÒÆğÖ´ĞĞ£¬ÄÇÃ´Á¢¼´°²ÅÅÏß³Ì³ØÖ´ĞĞËü¡£
+*PostToSenderä½œç”¨ï¼šå°†ä¸€ä¸ªä»»åŠ¡æŠ•é€’åˆ°å¯¹åº” sender_id çš„ä»»åŠ¡é˜Ÿåˆ—ä¸­ã€‚å¦‚æœé˜Ÿåˆ—ä¹‹å‰æ˜¯ç©ºä¸”æœªè¿è¡Œï¼Œåˆ™è‡ªåŠ¨è§¦å‘è¯¥é˜Ÿåˆ—æ‰§è¡Œã€‚
+*è¯¦ç»†æµç¨‹ï¼š
+    1ã€æ‰¾åˆ°æˆ–åˆ›å»ºä¸€ä¸ª sender çš„ä¸²è¡Œé˜Ÿåˆ—ï¼ˆSSenderStrandï¼‰
+        é€šè¿‡å…¨å±€ g_mapStrands[strSenderId] è·å–å¯¹åº”çš„ä¸Šä¸‹æ–‡ï¼ˆåŒ…å«é˜Ÿåˆ—ã€è°ƒåº¦çŠ¶æ€ç­‰ï¼‰ã€‚
+    2ã€å‘å¯¹åº” sender çš„ä»»åŠ¡é˜Ÿåˆ—ä¸­è¿½åŠ ä»»åŠ¡ï¼ˆFIFOï¼‰
+        æ‰€æœ‰ä»»åŠ¡éƒ½ç”¨ std::function<void()> åŒ…è£…ï¼Œå¯ä»¥ç»‘å®šä»»æ„ä»£ç ï¼ˆå¦‚ TESLA åŒ…è§£ç ã€å¯†é’¥éªŒè¯ç­‰ï¼‰ã€‚
+    3ã€åˆ¤æ–­æ˜¯å¦éœ€è¦è°ƒåº¦è¿è¡Œé˜Ÿåˆ—ä»»åŠ¡
+        å¦‚æœé˜Ÿåˆ—ä¹‹å‰æ˜¯ç©ºçš„ï¼Œä¸”è¿™ä¸ª sender å½“å‰æ²¡æœ‰æŒ‚èµ·æ‰§è¡Œï¼Œé‚£ä¹ˆç«‹å³å®‰æ’çº¿ç¨‹æ± æ‰§è¡Œå®ƒã€‚
 
-*PostDrainLocked_×÷ÓÃ£ºÔÚºóÌ¨Ïß³ÌÖĞË³ĞòÖ´ĞĞ¸Ã sender_id µÄËùÓĞÈÎÎñ¡£Ö´ĞĞÍê¶ÓÁĞÎª¿Õºó×Ô¶¯ÍË³ö£¬²»Õ¼×ÊÔ´¡£
-*Ö´ĞĞÂß¼­£º 
-    1¡¢ÉèÖÃ±ê¼Ç bScheduled=true£¬±íÊ¾µ±Ç° sender ÕıÔÚÖ´ĞĞÈÎÎñ¡£
-    2¡¢Í¶µİÒ»¸öÏß³Ì³ØÈÎÎñÀ´¡°Drain¡±ÈÎÎñ¶ÓÁĞ
-        Õâ¸öÏß³ÌÖ´ĞĞÒ»¸öÎŞÏŞÑ­»·£º
-            ´Ó¶ÓÁĞÍ·È¡Ò»¸öÈÎÎñ£¨±£Ö¤ FIFO Ë³Ğò£©
-            Ö´ĞĞÈÎÎñº¯Êı fn()
-            ¼ÌĞøÈ¡ÏÂÒ»¸ö£¬Ö±µ½¶ÓÁĞ±ä¿ÕÍË³ö
-    3¡¢ÈÎÎñº¯Êı fn() ÊÇÓÉÄã·â×°µÄ´¦ÀíÂß¼­
-        ±ÈÈç£ºTESLA µ¥°ü´¦Àí¡¢ÃÜÔ¿ÑéÖ¤¡¢¾ÛºÏÑéÖ¤¡¢×´Ì¬¸üĞÂµÈ¡£
-    4¡¢Ö´ĞĞÍê¶ÓÁĞºó£¬Çå³ı bScheduled ±êÖ¾
-        ±íÊ¾¸Ã sender µ±Ç°Ã»ÓĞÈÎÎñÔÚÅÜ£¬ºóĞøĞÂµÄÈÎÎñ¿ÉÔÙ´Î´¥·¢Ö´ĞĞ¡£
+*PostDrainLocked_ä½œç”¨ï¼šåœ¨åå°çº¿ç¨‹ä¸­é¡ºåºæ‰§è¡Œè¯¥ sender_id çš„æ‰€æœ‰ä»»åŠ¡ã€‚æ‰§è¡Œå®Œé˜Ÿåˆ—ä¸ºç©ºåè‡ªåŠ¨é€€å‡ºï¼Œä¸å èµ„æºã€‚
+*æ‰§è¡Œé€»è¾‘ï¼š 
+    1ã€è®¾ç½®æ ‡è®° bScheduled=trueï¼Œè¡¨ç¤ºå½“å‰ sender æ­£åœ¨æ‰§è¡Œä»»åŠ¡ã€‚
+    2ã€æŠ•é€’ä¸€ä¸ªçº¿ç¨‹æ± ä»»åŠ¡æ¥â€œDrainâ€ä»»åŠ¡é˜Ÿåˆ—
+        è¿™ä¸ªçº¿ç¨‹æ‰§è¡Œä¸€ä¸ªæ— é™å¾ªç¯ï¼š
+            ä»é˜Ÿåˆ—å¤´å–ä¸€ä¸ªä»»åŠ¡ï¼ˆä¿è¯ FIFO é¡ºåºï¼‰
+            æ‰§è¡Œä»»åŠ¡å‡½æ•° fn()
+            ç»§ç»­å–ä¸‹ä¸€ä¸ªï¼Œç›´åˆ°é˜Ÿåˆ—å˜ç©ºé€€å‡º
+    3ã€ä»»åŠ¡å‡½æ•° fn() æ˜¯ç”±ä½ å°è£…çš„å¤„ç†é€»è¾‘
+        æ¯”å¦‚ï¼šTESLA å•åŒ…å¤„ç†ã€å¯†é’¥éªŒè¯ã€èšåˆéªŒè¯ã€çŠ¶æ€æ›´æ–°ç­‰ã€‚
+    4ã€æ‰§è¡Œå®Œé˜Ÿåˆ—åï¼Œæ¸…é™¤ bScheduled æ ‡å¿—
+        è¡¨ç¤ºè¯¥ sender å½“å‰æ²¡æœ‰ä»»åŠ¡åœ¨è·‘ï¼Œåç»­æ–°çš„ä»»åŠ¡å¯å†æ¬¡è§¦å‘æ‰§è¡Œã€‚
 */
 
-// °Ñ drain(´®ĞĞºÄ¾¡)ÈÎÎñ¶ª¸øÏß³Ì³Ø
+// æŠŠ drain(ä¸²è¡Œè€—å°½)ä»»åŠ¡ä¸¢ç»™çº¿ç¨‹æ± 
 static void PostDrainLocked_(const shared_ptr<SSenderStrand>& pStrand) {
     pStrand->bScheduled = true;
     g_pThreadPool->Enqueue([pStrand] {
@@ -269,7 +273,7 @@ static void PostDrainLocked_(const shared_ptr<SSenderStrand>& pStrand) {
         });
 }
 
-// Í¶µİÈÎÎñµ½Ä³¸ö sender µÄ´®ĞĞÍ¨µÀ
+// æŠ•é€’ä»»åŠ¡åˆ°æŸä¸ª sender çš„ä¸²è¡Œé€šé“
 static void PostToSender(const string& strSenderId, function<void()> fnTask) {
     shared_ptr<SSenderStrand> p;
     {
@@ -296,7 +300,7 @@ static void PostToSender(const string& strSenderId, function<void()> fnTask) {
     if (bNeedSchedule) PostDrainLocked_(p);
 }
 
-// ¿ÕÏĞ»ØÊÕ£ºÎŞÈÎÎñÇÒ³¤Ê±¼äÎŞ»î¶¯µÄ strand ±»»ØÊÕ
+// ç©ºé—²å›æ”¶ï¼šæ— ä»»åŠ¡ä¸”é•¿æ—¶é—´æ— æ´»åŠ¨çš„ strand è¢«å›æ”¶
 static void GcIdleStrands() {
     const long long now = lCurrentTimeMillis();
     vector<string> vecRemove;
@@ -314,7 +318,7 @@ static void GcIdleStrands() {
 }
 // ===== END ADDED
 
-//ÒÑÖª sender ±í£¨ÊÕµ½ Init ²ÅËã¡°ÒÑÖª¡±£©
+//å·²çŸ¥ sender è¡¨ï¼ˆæ”¶åˆ° Init æ‰ç®—â€œå·²çŸ¥â€ï¼‰
 static inline void MarkSenderKnown(const string& strSenderId) {
     lock_guard<mutex> g(g_mtxKnown);
     g_setKnownSenders.insert(strSenderId);
@@ -325,7 +329,7 @@ static inline bool IsSenderKnown(const string& strSenderId) {
     return g_setKnownSenders.count(strSenderId) > 0;
 }
 
-//Ö»È·±£Ä³ sender µÄ strand ´æÔÚ£¨²»Í¶ÈÎÎñ£©Èç¹ûÃ»ÓĞ¾Í´´½¨
+//åªç¡®ä¿æŸ sender çš„ strand å­˜åœ¨ï¼ˆä¸æŠ•ä»»åŠ¡ï¼‰å¦‚æœæ²¡æœ‰å°±åˆ›å»º
 static void EnsureStrandExists(const string& strSenderId) {
     lock_guard<mutex> g(g_mtxStrands);
     if (g_mapStrands.find(strSenderId) == g_mapStrands.end()) 
@@ -339,14 +343,14 @@ static void EnsureStrandExists(const string& strSenderId) {
 void print_hash(string p) 
 {
     for (unsigned int i = 0; i < p.size(); ++i) {
-        printf("%02x", static_cast<unsigned char>(p[i]));  // Ğ¡Ğ´ 16 ½øÖÆ¸ñÊ½
+        printf("%02x", static_cast<unsigned char>(p[i]));  // å°å†™ 16 è¿›åˆ¶æ ¼å¼
     }
 }
 
 void print_packet(const TeslaProtocolPacket& ppacket) 
 {
     cout << "[Packet : Index " << ppacket.nIndex << " | Message = "
-        << ppacket.strMessage << " | MAC = " << ppacket.strMac << " | Key = "
+        << ppacket.strMessage/*<< " | MAC = " << ppacket.strMac*/  << " | Key = "
         << ppacket.strDisclosedKey << "]" << endl << endl;
 }
 
@@ -367,7 +371,7 @@ string strToHexString(const unsigned char* data, size_t nlength)
 string strF_Prime(const string& strKi, const string& strContext) 
 {
     unsigned char hash[SHA256_DIGEST_LENGTH];
-    string strInput = strKi + strContext; // ¼ÓÈëÉÏÏÂÎÄ·ÀÖ¹ÖØÓÃ
+    string strInput = strKi + strContext; // åŠ å…¥ä¸Šä¸‹æ–‡é˜²æ­¢é‡ç”¨
 
     SHA256(reinterpret_cast<const unsigned char*>(strInput.c_str()), strInput.size(), hash);
     return string(reinterpret_cast<char*>(hash), SHA256_DIGEST_LENGTH);
@@ -514,18 +518,6 @@ static string strToHex(const string& strInput) {
     return strOutput;
 }
 
-struct TagEntry {
-    int nSlot;
-    string strMac;
-};
-
-static void AppendU32Le(string& strOut, uint32_t value) {
-    strOut.push_back(static_cast<char>(value & 0xFF));
-    strOut.push_back(static_cast<char>((value >> 8) & 0xFF));
-    strOut.push_back(static_cast<char>((value >> 16) & 0xFF));
-    strOut.push_back(static_cast<char>((value >> 24) & 0xFF));
-}
-
 static string strHashFunc(const string& strData) {
     unsigned char hash[SHA256_DIGEST_LENGTH];
     unsigned int len = 0;
@@ -544,233 +536,603 @@ static string strHashFunc(const string& strData) {
     return std::string(reinterpret_cast<char*>(hash), SHA256_DIGEST_LENGTH);
 }
 
-string strSeqAgg(const vector<TagEntry>& vecTags) {
-    string strBuffer;
-    strBuffer.reserve(vecTags.size() * 48);
-    for (const auto& e : vecTags) {
-        strBuffer.push_back(0x01);                      // ·Ö¸ô·û
-        AppendU32Le(strBuffer, static_cast<uint32_t>(e.nSlot));               // slot ±àÂë
-        AppendU32Le(strBuffer, e.strMac.size());         // MAC ³¤¶ÈÇ°×º
-        strBuffer.append(e.strMac);                        // MAC ÄÚÈİ
-    }
-    return strToHex(strHashFunc(strBuffer));
-}
-
-// Ã¿¸ö slot µÄÌõÄ¿£¨µ±ÈıÕß¶¼·Ç¿ÕÊ±£¬²Å¿É²ÎÓë¾ÛºÏ£©
+// æ¯ä¸ª slot çš„æ¡ç›®ï¼ˆå½“ä¸‰è€…éƒ½éç©ºæ—¶ï¼Œæ‰å¯å‚ä¸èšåˆï¼‰
 struct SlotItem {
     string strMsg;   // m_i
-    string strMac;   // ±¨ÎÄĞ¯´øµÄ t_i
-    string strKey;   // ÅûÂ¶µÄ K_i
+    string strKey;   // æŠ«éœ²çš„ K_i
     string strContext;
 };
 
-// Ã¿×é£¨10 Ìõ£©µÄ¡°Í°¡±£ºÓÃ map<int, SlotItem> ¿É±£³Ö slot ÓĞĞò£¬±ãÓÚË³Ğò¾ÛºÏ
+// æ¯ç»„ï¼ˆ10 æ¡ï¼‰çš„â€œæ¡¶â€ï¼šç”¨ map<int, SlotItem> å¯ä¿æŒ slot æœ‰åºï¼Œä¾¿äºé¡ºåºèšåˆ
 struct GroupBucket {
     map<int, SlotItem> items;                 // slot -> SlotItem
-    chrono::steady_clock::time_point touch;   // ×î½üÒ»´Î¼ÓÈëÊ±¼ä
+    chrono::steady_clock::time_point touch;   // æœ€è¿‘ä¸€æ¬¡åŠ å…¥æ—¶é—´
 };
 
-// È«¾Ö/Íâ²¿£ºÃ¿¸ö group_id µÄÍ°
-unordered_map<int, GroupBucket> g_groups;
+// å…¨å±€/å¤–éƒ¨ï¼šæ¯ä¸ª group_id çš„æ¡¶
+unordered_map<string, unordered_map<int, GroupBucket>> g_groups_by_sender;
 
-// ×éÄÚ¾ÛºÏÑéÖ¤ + »ØÍË¶¨Î»£¨³É¹¦·µ»Ø true£»Ê§°Ü´òÓ¡´íÎó slot£©
-static bool bVerifyGroupSa2(int nGroupId, GroupBucket& gb) {
-    if (gb.items.empty()) return true; // ¿Õ×éµ±Í¨¹ı
-
-    // ¹¹Ôì¡°½ÓÊÕ MAC ĞòÁĞ¡±
-    vector<TagEntry> vecRecvTags;
-    vecRecvTags.reserve(gb.items.size());
-    for (map<int, SlotItem>::iterator kv = gb.items.begin(); kv != gb.items.end(); ++kv) 
+bool IsPrime(int x)
+{
+    if (x <= 1) return false;
+    if (x == 2 || x == 3) return true;
+    if ((x & 1) == 0) return false;
+    int i = 3;
+    while ((long long)i * (long long)i <= (long long)x)
     {
-        const int nSlot = kv->first;
-        const SlotItem& it = kv->second;
-        // Ö»ÓĞÈı¼şÌ×¶¼ÆëÁËµÄ²Å²ÎÓë£¨m¡¢mac¡¢key£©
-        if (!it.strMsg.empty() && !it.strMac.empty() && !it.strKey.empty()) 
-        {
-            TagEntry entry;
-            entry.nSlot = nSlot;
-            entry.strMac = it.strMac;
-            vecRecvTags.push_back(entry);
-        }
+        if (x % i == 0) return false;
+        i += 2;
     }
-    if (vecRecvTags.empty()) return true; // ÉĞÎ´ÆëµÄ£¬ÏÈ²»±¨´í
-
-    // ¦Ó_recv£ºÖ±½Ó¶Ô¡°ÊÕµ½µÄ MAC ĞòÁĞ¡±×ö¾ÛºÏ
-    const string strTauRecv = strSeqAgg(vecRecvTags);
-
-    // ¦Ó_calc£º¶Ô¡°ÅûÂ¶ÃÜÔ¿ÖØËãµÄ MAC ĞòÁĞ¡±×ö¾ÛºÏ
-    vector<TagEntry> vecCalcTags;
-    vecCalcTags.reserve(vecRecvTags.size());
-    for (map<int, SlotItem>::iterator kv = gb.items.begin(); kv != gb.items.end(); ++kv) 
-    {
-        const int slot = kv->first;
-        const SlotItem& it = kv->second;
-        if (!it.strMsg.empty() && !it.strMac.empty() && !it.strKey.empty()) 
-        {
-            string strMacCalc = strComputeMAC(it.strMsg, it.strKey, it.strContext + to_string(slot));
-            TagEntry entry;
-            entry.nSlot = slot;
-            entry.strMac = strMacCalc;
-            vecCalcTags.push_back(entry);
-        }
-    }
-    const string strTauCalc = strSeqAgg(vecCalcTags);
-
-    // ±È½Ï ¦Ó£¨³£Á¿Ê±¼ä±È½Ï£©
-    const bool ok = (strTauRecv == strTauCalc);
-
-    if (!ok) 
-    {
-        cerr << "[SAVrfy FAIL] group " << nGroupId
-            << " size=" << gb.items.size()
-            << " -> fallback locate" << endl;
-
-        // ÖğÌõ¶¨Î»£ºÕÒ³öÄÄ¼¸¸ö slot µÄ MAC ²»Ò»ÖÂ
-        for (map<int, SlotItem>::iterator kv = gb.items.begin(); kv != gb.items.end(); ++kv) 
-        {
-            const int nSlot = kv->first;
-            const SlotItem& it = kv->second;
-            if (it.strMsg.empty() || it.strMac.empty() || it.strKey.empty())
-            {
-                continue;
-            }
-            string strMacCalc = strComputeMAC(it.strMsg, it.strKey, it.strContext + to_string(nSlot + 1));
-            if (it.strMac != strMacCalc)
-            {
-                cerr << "  - BAD slot " << nSlot << endl;
-            }
-        }
-    }
-
-    return ok;
+    return true;
 }
 
-// ´¥·¢¾ÛºÏ²¢Çå¿Õ¸Ã×é£¨Âú×é¡¢³¬Ê±¡¢½áÊøÊ±¶¼»áµ÷ÓÃ£©
-static void FlushGroup(string strSenderId, int group_id) 
+int NextPrime(int x)
 {
-    unordered_map<int, GroupBucket>::iterator it = g_groups.find(group_id);
-    if (it == g_groups.end()) return;
+    if (x <= 2) return 2;
+    int n = x;
+    if ((n & 1) == 0) n += 1;
+    while (!IsPrime(n))
+    {
+        n += 2;
+    }
+    return n;
+}
 
-    GroupBucket& gb = it->second;
+//--------------------------------------
+// è®¡ç®—æœ€å° kï¼Œä½¿ q^k >= Nï¼ˆç”¨æ•´æ•°ç´¯ä¹˜é¿å…æµ®ç‚¹ï¼‰
+//--------------------------------------
+int MinK_Pow_q_ge_N(int N, int q, int k_max)
+{
+    int k = 0;
+    long long cur = 1;
+    while (cur < (long long)N && k < k_max)
+    {
+        cur = cur * (long long)q;
+        ++k;
+    }
+    if (cur >= (long long)N && k > 0) return k;
+    // è¡¨ç¤ºå¤±è´¥ï¼ˆåœ¨ç»™å®š k_max èŒƒå›´å†…æ‰¾ä¸åˆ°ï¼‰
+    return -1;
+}
+
+//--------------------------------------
+// å¹‚: base^exp mod mod
+//--------------------------------------
+int PowModInt(int base, int exp, int mod)
+{
+    long long result = 1;
+    long long b = base % mod;
+    int e = exp;
+    while (e > 0)
+    {
+        if ((e & 1) != 0)
+        {
+            result = (result * b) % mod;
+        }
+        b = (b * b) % mod;
+        e >>= 1;
+    }
+    return (int)result;
+}
+
+//--------------------------------------
+// KS çŸ©é˜µç»“æ„
+//--------------------------------------
+struct KSMatrix
+{
+    int N;
+    int d;
+    int q;
+    int n;
+    int k;
+    int u;
+    vector< vector<int> > G;  // u x N 0/1 çŸ©é˜µ
+};
+
+static KSMatrix g_SamdKSGt;
+static bool g_bSmadGtInited = false;
+
+//--------------------------------------
+// åœ¨ KS+RS æ—ä¸­æœç´¢ q,n,kï¼Œä½¿ u=n*q å°½å¯èƒ½å°
+//--------------------------------------
+void FindBestParamsForKSRS(int N, int d,
+    int& best_q, int& best_n,
+    int& best_k, int& best_u)
+{
+    int q_start = 2 * d + 1;
+    if (q_start < 2) q_start = 2;
+    int q = NextPrime(q_start);
+
+    int globalBestU = -1;
+    int globalBestQ = -1;
+    int globalBestN = -1;
+    int globalBestK = -1;
+
+    // è®¾ä¸€ä¸ªå®‰å…¨ä¸Šç•Œï¼ˆè§†éœ€æ±‚å¯è°ƒï¼‰
+    int q_max = 10000;
+    int k_max = 16; // å¯¹ N åœ¨ 100~1000ã€q ä¸å¤ªå¤§æ—¶è¶³å¤Ÿ
+
+    while (q <= q_max)
+    {
+        // å¯¹å½“å‰ qï¼Œå…ˆæ‰¾æœ€å° k æ»¡è¶³ q^k >= N
+        int k = MinK_Pow_q_ge_N(N, q, k_max);
+        if (k != -1)
+        {
+            int n = k + 2 * d;
+            // RS ç é•¿åº¦è¦æ±‚ n <= q
+            if (n <= q)
+            {
+                int u = n * q;
+                if (globalBestU < 0 || u < globalBestU)
+                {
+                    globalBestU = u;
+                    globalBestQ = q;
+                    globalBestN = n;
+                    globalBestK = k;
+                }
+            }
+        }
+
+        // å¯ä»¥åŠ ä¸ªå‰ªæï¼šå¦‚æœ q å·²ç»è¿œå¤§äº globalBestUï¼Œä¹Ÿå¯ä»¥ break
+        // è¿™é‡Œä¸ºäº†ç®€å•å°±ä¸å†™å‰ªæäº†
+        q = NextPrime(q + 1);
+    }
+
+    if (globalBestU < 0)
+    {
+        // æ²¡æ‰¾åˆ°åˆæ³•å‚æ•°ï¼ˆå‡ ä¹ä¸å¯èƒ½å‡ºç°äºä½ å½“å‰ N,d èŒƒå›´ï¼‰ï¼Œ
+        // è¿™é‡Œç®€å•é€€å›åˆ° q = NextPrime(max(2d+1, N)ï¼Œn=qï¼Œk=1 çš„æ–¹æ¡ˆï¼‰
+        int lower_q = 2 * d + 1;
+        if (lower_q < N) lower_q = N;
+        int fallback_q = NextPrime(lower_q);
+        int fallback_k = 1;
+        int fallback_n = fallback_k + 2 * d;
+        if (fallback_n > fallback_q) fallback_n = fallback_q;
+        int fallback_u = fallback_n * fallback_q;
+
+        best_q = fallback_q;
+        best_n = fallback_n;
+        best_k = fallback_k;
+        best_u = fallback_u;
+        return;
+    }
+
+    best_q = globalBestQ;
+    best_n = globalBestN;
+    best_k = globalBestK;
+    best_u = globalBestU;
+}
+
+//--------------------------------------
+// æŒ‰æœ€ä¼˜å‚æ•°æ„é€  KS+RS äºŒè¿›åˆ¶çŸ©é˜µ
+//--------------------------------------
+void BuildOptimizedKSMatrix()
+{
+
+    g_SamdKSGt.N = N_GROUP_SIZE;
+    g_SamdKSGt.d = N_DECTECING;
+
+    int q, n, k, u;
+    FindBestParamsForKSRS(N_GROUP_SIZE, N_DECTECING, q, n, k, u);
+
+    g_SamdKSGt.q = q;
+    g_SamdKSGt.n = n;
+    g_SamdKSGt.k = k;
+    g_SamdKSGt.u = u;
+
+    // æ„é€  q å…ƒ RS ç å­—ï¼šrs_code[i][j], i=0..n-1, j=0..N-1
+    vector< vector<int> > rs_code;
+    rs_code.assign(g_SamdKSGt.n, vector<int>(g_SamdKSGt.N, 0));
+
+    int j = 0;
+    int i = 0;
+    int t = 0;
+
+    j = 0;
+    while (j < g_SamdKSGt.N)
+    {
+        // j çš„ q è¿›åˆ¶å±•å¼€åˆ° a[0..k-1]
+        int tmp = j;
+        int a[64];
+        t = 0;
+        while (t < 64)
+        {
+            a[t] = 0;
+            ++t;
+        }
+        t = 0;
+        while (t < g_SamdKSGt.k)
+        {
+            a[t] = tmp % g_SamdKSGt.q;
+            tmp = tmp / g_SamdKSGt.q;
+            ++t;
+        }
+
+        // åœ¨ x=0..n-1 ä¸Šè¯„ä¼° P_j(x)
+        i = 0;
+        while (i < g_SamdKSGt.n)
+        {
+            long long val = 0;
+            int x = i;
+            t = 0;
+            while (t < g_SamdKSGt.k)
+            {
+                int x_pow_t = PowModInt(x, t, g_SamdKSGt.q);
+                long long term = (long long)a[t] * (long long)x_pow_t;
+                val += term;
+                val %= g_SamdKSGt.q;
+                ++t;
+            }
+            rs_code[i][j] = (int)val;
+            ++i;
+        }
+
+        ++j;
+    }
+
+    // KS æ˜ å°„ï¼šå¾—åˆ° u x N çš„ 0/1 çŸ©é˜µ
+    g_SamdKSGt.G.assign(g_SamdKSGt.u, vector<int>(g_SamdKSGt.N, 0));
+
+    i = 0;
+    while (i < g_SamdKSGt.n)
+    {
+        j = 0;
+        while (j < g_SamdKSGt.N)
+        {
+            int s = rs_code[i][j];  // 0..q-1
+            int row = i * g_SamdKSGt.q + s;
+            g_SamdKSGt.G[row][j] = 1;
+            ++j;
+        }
+        ++i;
+    }
+
+    g_bSmadGtInited = true;
+}
+
+void EnsureSamdGtMatrix()
+{
+    if (!g_bSmadGtInited)
+    {
+        BuildOptimizedKSMatrix();
+    }
+}
+
+string strSamdHashFromMacList(const vector<string>& vecMACs)
+{
+    string strBuffer;
+    int n = (int)vecMACs.size();
+    for (int i = 0; i < n; i++)
+    {
+        strBuffer.push_back((char)0x01);
+        strBuffer.append(vecMACs[i]);
+    }
+
+    return strToHex(strHashFunc(strBuffer));
+}
+
+/****************************************************
+*æŒ‰è¡Œçº¿æ€§æ‰«æ matrixï¼Œæ¢å¤â€œæ­£ç¡®å­é›† / åå­é›†â€
+*
+*è¾“å…¥ï¼š
+* vecTags     â€“ æœ¬åœ°é‡ç®—çš„ t_j åˆ—è¡¨ï¼ˆé¡ºåºå°±æ˜¯ slot é¡ºåºï¼‰
+* vecTauRecv  â€“ æ”¶åˆ°çš„ SAMD èšåˆæ ‡ç­¾ Ï„_iï¼ˆé•¿åº¦ â‰¤ uï¼‰
+* è¾“å‡ºï¼š
+* vecGoodPos  â€“ åœ¨ vecTags ä¸­çš„â€œå¥½â€ä½ç½®é›†åˆï¼ˆä¸‹æ ‡ï¼‰
+* vecBadPos   â€“ â€œåâ€ä½ç½®é›†åˆï¼ˆä¸‹æ ‡ï¼Œå¯¹åº”ç¯¡æ”¹æˆ–ä¸¢åŒ…ï¼‰
+* è¿”å›ï¼š
+* true  â€“ æ‰€æœ‰ä½ç½®å‡è¢«åˆ¤å®šä¸ºå¥½ï¼ˆvecBadPos ä¸ºç©ºï¼‰
+* false â€“ å­˜åœ¨åä½ç½®
+*  ****************************************************/
+static int Samd_DSAVrfy(
+    const vector<string>& vecTags,
+    const vector<string>& vecTauRecv,
+    vector<int>& vecGoodPos,
+    vector<int>& vecBadPos
+)
+{
+    EnsureSamdGtMatrix();
+
+    int m = (int)vecTags.size();
+    int u = g_SamdKSGt.u;
+    int uRecv = (int)vecTauRecv.size();
+
+    vecGoodPos.clear();
+    vecBadPos.clear();
+
+    if (m == 0) {
+        return true;
+    }
+
+    // åˆå§‹å‡è®¾æ¯ä¸ªä½ç½®éƒ½æ˜¯â€œå¯èƒ½åçš„â€
+    vector<int> isGood(m, 0);
+
+    // å¯¹æ¯ä¸€è¡Œåšä¸€æ¬¡çº¿æ€§æ‰«æ
+    for (int i = 0; i < u && i < uRecv; ++i) {
+        if (vecTauRecv[i].empty()) {
+            continue;   // è¿™ä¸€è¡Œå¯¹æœ¬ç»„ä¸èµ·ä½œç”¨
+        }
+
+        vector<int> idxList;
+        vector<string> subset;
+
+        for (int j = 0; j < m && j < g_SamdKSGt.N; ++j) {
+            if (g_SamdKSGt.G[i][j] == 1) {
+                idxList.push_back(j);
+                subset.push_back(vecTags[j]);
+            }
+        }
+        if (subset.empty()) {
+            continue;
+        }
+
+        string tauCalc = strSamdHashFromMacList(subset);
+
+        if (tauCalc == vecTauRecv[i]) {
+            // è¯¥æµ‹è¯•è¡Œé€šè¿‡ â‡’ è¡Œä¸Šè¦†ç›–çš„æ‰€æœ‰ slot å‡ä¸ºâ€œå¥½â€
+            int len = (int)idxList.size();
+            for (int k = 0; k < len; ++k) {
+                int pos = idxList[k];
+                if (pos >= 0 && pos < m) {
+                    isGood[pos] = 1;
+                }
+            }
+        }
+    }
+
+    // æ”¶é›†å¥½ / åä½ç½®
+    for (int j = 0; j < m; ++j) {
+        if (isGood[j]) {
+            vecGoodPos.push_back(j);
+        }
+        else {
+            vecBadPos.push_back(j);
+        }
+    }
+
+    return vecBadPos.size();
+}
+
+/****************************************************
+ * å’Œä½ ç°æœ‰ GroupBucket çš„å°è£…ç‰ˆæœ¬ï¼š
+ *   bVerifyGroupSAMD
+ *
+ * åŠŸèƒ½ï¼š
+ *   - ä» gb ä¸­æŠ½å–æœ‰ message + key çš„ slotï¼›
+ *   - ç”¨ TESLA çš„è§„åˆ™é‡ç®—æ¯æ¡ MACï¼ˆt_jï¼‰ï¼›
+ *   - è°ƒç”¨ Samd_DSAVrfy åšçº¿æ€§æ‰«æï¼Œè¾“å‡ºâ€œå¥½ / å slotâ€ï¼›
+ *
+ * è¾“å…¥ï¼š
+ *   nGroupId    â€“ ç»„å·ï¼ˆä»…ç”¨äºæ—¥å¿—ï¼‰
+ *   gb          â€“ æœ¬ç»„çš„ç¼“å­˜ï¼ˆmap<int, SlotItem>ï¼‰
+ *   vecTauRecv  â€“ æœ¬ç»„æ”¶åˆ°çš„ SAMD èšåˆæ ‡ç­¾å‘é‡ Ï„_i
+ * è¾“å‡ºï¼š
+ *   vecGoodSlots â€“ è¢«åˆ¤ä¸ºâ€œå¥½â€çš„å…¨å±€ slot ç¼–å·é›†åˆ
+ *   vecBadSlots  â€“ è¢«åˆ¤ä¸ºâ€œå/ä¸¢åŒ…â€çš„å…¨å±€ slot ç¼–å·é›†åˆ
+ * è¿”å›ï¼š
+ *   true  â€“ æ‰€æœ‰ slot å‡ä¸ºå¥½ï¼ˆvecBadSlots ä¸ºç©ºï¼‰
+ *   false â€“ å­˜åœ¨å slot
+ ****************************************************/
+static bool bVerifyGroupSAMD(
+    int nGroupId,
+    GroupBucket& gb,
+    const vector<string>& vecTauRecv,
+    vector<int>& vecGoodSlots,
+    vector<int>& vecBadSlots
+)
+{
+    // 1) ä» group ä¸­æŠ½å‡ºæœ‰å®Œæ•´ä¿¡æ¯çš„ slotï¼Œå¹¶é‡ç®— MAC
+    vector<int> vecSlotIds;      // æ˜ å°„ï¼šä½ç½® j -> å…¨å±€ slot ç¼–å·
+    vector<string> vecTags;      // t_j = MAC(m_j, k_j)
+
+    for (map<int, SlotItem>::iterator it = gb.items.begin(); it != gb.items.end(); ++it) {
+        int nSlot = it->first;
+        const SlotItem& item = it->second;
+
+        // SAMD æ„é€ é‡Œï¼Œåªéœ€è¦æ¶ˆæ¯ + å¯†é’¥å°±èƒ½é‡ç®— t_j
+        if (item.strMsg.empty() || item.strKey.empty()) {
+            continue;
+        }
+
+        // æ³¨æ„è¿™é‡Œè¦è·Ÿå‘é€ç«¯ä¿æŒåŒä¸€æ¡ MAC è®¡ç®—è§„åˆ™
+        // ä½ ä¹‹å‰åœ¨ strTauCalc é‡Œç”¨çš„æ˜¯ strContext + to_string(slot)
+        string strMacCalc = strComputeMAC(
+            item.strMsg,
+            item.strKey,
+            item.strContext + to_string(nSlot)
+        );
+
+        vecSlotIds.push_back(nSlot);
+        vecTags.push_back(strMacCalc);
+    }
+
+    // 2) è°ƒç”¨ SAMD çš„ DSAVrfyï¼Œåœ¨çº¿æ€§æ—¶é—´å†…æ¢å¤â€œå¥½ / åå­é›†â€
+    vector<int> goodPos;
+    vector<int> badPos;
+    int nBadSlotCnt = Samd_DSAVrfy(vecTags, vecTauRecv, goodPos, badPos);
+    if (nBadSlotCnt > N_DECTECING)
+    {
+        cout << "The current network environment is poorï¼Œlost packet is over DECTECING" << endl;
+        return false;
+    }
+
+    vecGoodSlots.clear();
+    vecBadSlots.clear();
+
+    int goodCount = (int)goodPos.size();
+    for (int i = 0; i < goodCount; ++i) {
+        int pos = goodPos[i];
+        if (pos >= 0 && pos < (int)vecSlotIds.size()) {
+            vecGoodSlots.push_back(vecSlotIds[pos]);
+        }
+    }
+
+    int badCount = (int)badPos.size();
+    for (int i = 0; i < badCount; ++i) {
+        int pos = badPos[i];
+        if (pos >= 0 && pos < (int)vecSlotIds.size()) {
+            vecBadSlots.push_back(vecSlotIds[pos]);
+        }
+    }
+
+    // ç®€å•æ—¥å¿—
+    if (nBadSlotCnt > 0) {
+        cerr << "[SAMD] group " << nGroupId << " bad slots: ";
+        for (int i = 0; i < (int)vecBadSlots.size(); ++i) {
+            cerr << vecBadSlots[i] << " ";
+        }
+        cerr << endl;
+        return false;
+    }
+
+    return true;
+}
+
+
+
+// è§¦å‘èšåˆå¹¶æ¸…ç©ºè¯¥ç»„ï¼ˆæ»¡ç»„ã€è¶…æ—¶ã€ç»“æŸæ—¶éƒ½ä¼šè°ƒç”¨ï¼‰
+static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& vecRecvTau)
+{
+    auto itSender = g_groups_by_sender.find(strSenderId);
+    if (itSender == g_groups_by_sender.end()) return;
+
+    auto& groups = itSender->second;
+    auto itGroup = groups.find(nGroupId);
+    if (itGroup == groups.end()) return;
+
+    GroupBucket& gb = itGroup->second;
     if (gb.items.empty()) return;
 
-    const bool bOk = bVerifyGroupSa2(group_id, gb);
-    cout << "Sender: " << strSenderId
-        << " [flush] group " << group_id
-        << " count=" << gb.items.size()
-        << " result=" << bOk << endl;
+    vector<int> vecGoodSlots;
+    vector<int> vecBadSlots;
+    //const bool bOk = bVerifyGroupSa2(group_id, gb);
+    const bool bOk = bVerifyGroupSAMD(nGroupId, gb, vecRecvTau, vecGoodSlots, vecBadSlots);
+    if (bOk)
+    {
+        cout << "Sender: " << strSenderId
+            << " [flush] group " << nGroupId
+            << " count=" << gb.items.size()
+            << " result=" << bOk << endl;
+    }
 
-    gb.items.clear(); // Çå¿Õ¸Ã×é
+    gb.items.clear(); // æ¸…ç©ºè¯¥ç»„
 }
 
-// ¹¤¾ßº¯Êı£º°ÑÄ³¸ö slot µÄÌõÄ¿·ÅÈë¶ÔÓ¦×é
+// å·¥å…·å‡½æ•°ï¼šæŠŠæŸä¸ª slot çš„æ¡ç›®æ”¾å…¥å¯¹åº”ç»„
 void UpsertSlotIntoGroup(
     string strID,
     int nGroupId,
     int nSlot,
     const string& strMsg,
-    const string& strMac,
     const string& strKey,
+    const vector<string>& vecRecvTau,
     const string& strContext
 ) 
 {
-    GroupBucket& gb = g_groups[nGroupId];
+    GroupBucket& gb = g_groups_by_sender[strID][nGroupId];
     gb.touch = chrono::steady_clock::now();
 
-    // »ñÈ¡»ò´´½¨¸Ã slot µÄ item
+    // è·å–æˆ–åˆ›å»ºè¯¥ slot çš„ item
     SlotItem& item = gb.items[nSlot];
     if (!strMsg.empty()) item.strMsg = strMsg;
-    if (!strMac.empty()) item.strMac = strMac;
     if (!strKey.empty()) item.strKey = strKey;
     if (!strContext.empty()) item.strContext = strContext;
 
-    // ÅĞ¶Ïµ±Ç°×éÄÚÍêÕûÏîÊıÁ¿
+    // åˆ¤æ–­å½“å‰ç»„å†…å®Œæ•´é¡¹æ•°é‡
     int nComplete = 0;
     for (map<int, SlotItem>::iterator it = gb.items.begin(); it != gb.items.end(); ++it) 
     {
         const SlotItem& itVal = it->second;
-        if (!itVal.strMsg.empty() && !itVal.strMac.empty() && !itVal.strKey.empty())
+        if (!itVal.strMsg.empty() && !itVal.strKey.empty())
             ++nComplete;
     }
 
-    if (nComplete >= N_GROUP_SIZE)
+    if (nComplete >= N_GROUP_SIZE && !vecRecvTau.empty())
     {
-        FlushGroup(strID, nGroupId);
+        FlushGroup(strID, nGroupId, vecRecvTau);
+        return;
     }
+    /*else
+    {
+        cout << "Group: " << nGroupId << "Lost Tau, Ignore." << endl;
+        return;
+    }*/
 }
 
-// ¹¤¾ßº¯Êı£º¼ì²éËùÓĞ×éµÄ³¬Ê±£¨Ã¿´Î while Ñ­»·µ×²¿µ÷ÓÃ£©
-void CheckAllGroupsTimeout() 
-{
-    chrono::steady_clock::time_point now = chrono::steady_clock::now();
-    for (unordered_map<int, GroupBucket>::iterator it = g_groups.begin(); it != g_groups.end(); ++it) 
-    {
-        int gid = it->first;
-        GroupBucket& gb = it->second;
-        if (!gb.items.empty() && (now - gb.touch) > chrono::milliseconds(100)) 
-        {
-            FlushGroup("", gid);
-            gb.touch = now;
-        }
-    }
-}
+// å·¥å…·å‡½æ•°ï¼šæ£€æŸ¥æ‰€æœ‰ç»„çš„è¶…æ—¶ï¼ˆæ¯æ¬¡ while å¾ªç¯åº•éƒ¨è°ƒç”¨ï¼‰
+//void CheckAllGroupsTimeout() 
+//{
+//    chrono::steady_clock::time_point now = chrono::steady_clock::now();
+//    for (unordered_map<int, GroupBucket>::iterator it = g_groups.begin(); it != g_groups.end(); ++it) 
+//    {
+//        int gid = it->first;
+//        GroupBucket& gb = it->second;
+//        if (!gb.items.empty() && (now - gb.touch) > chrono::milliseconds(100)) 
+//        {
+//            FlushGroup("", gid);
+//            gb.touch = now;
+//        }
+//    }
+//}
 
-//Init °ü´¦Àí£¬¸ÄÎª per-sender ÉÏÏÂÎÄ 
+
+
+//Init åŒ…å¤„ç†ï¼Œæ”¹ä¸º per-sender ä¸Šä¸‹æ–‡ 
 static void HandleInitForSender(const string& strSenderId, const TeslaInitPacket& initPkt) {
     auto pCtx = GetOrCreateCtx(strSenderId);
 
-    pCtx->strKey0 = initPkt.strCommitmentKey;//ÃÜÔ¿µ¥ÏòÁ´key0£¬ÔÚ³õÊ¼½×¶Î·¢ËÍ¸ø½ÓÊÕ·½
-    pCtx->nTotalKeys = initPkt.nTotalKeys;//ÃÜÔ¿×ÜÊı
-    pCtx->nDelay = initPkt.nDisclosureDelay;//ÃÜÔ¿ÅûÂ¶ÑÓ³Ù
+    pCtx->strKey0 = initPkt.strCommitmentKey;//å¯†é’¥å•å‘é“¾key0ï¼Œåœ¨åˆå§‹é˜¶æ®µå‘é€ç»™æ¥æ”¶æ–¹
+    pCtx->nTotalKeys = initPkt.nTotalKeys;//å¯†é’¥æ€»æ•°
+    pCtx->nDelay = initPkt.nDisclosureDelay;//å¯†é’¥æŠ«éœ²å»¶è¿Ÿ
     pCtx->nIntervalLengthMs = initPkt.nIntervalLengthMs;
-    pCtx->strContext = initPkt.strContext;//F¡®Éú³ÉmessageMacµÄÉÏÏÂÎÄ
+    pCtx->strContext = initPkt.strContext;//Fâ€˜ç”ŸæˆmessageMacçš„ä¸Šä¸‹æ–‡
 
-    pCtx->lDeltaMs = lEstimateTimeOffset(initPkt);//¹ÀËã·¢ËÍ·½Ê±¼äÉÏ½çµÄ¦¤
+    pCtx->lDeltaMs = lEstimateTimeOffset(initPkt);//ä¼°ç®—å‘é€æ–¹æ—¶é—´ä¸Šç•Œçš„Î”
 
-    // ÖØĞÂ·ÖÅä»º³å£¬³¤¶È = N + 1£¨ÓëÄãÔ­Âß¼­Ò»ÖÂ£©
+    // é‡æ–°åˆ†é…ç¼“å†²ï¼Œé•¿åº¦ = N + 1ï¼ˆä¸ä½ åŸé€»è¾‘ä¸€è‡´ï¼‰
     pCtx->vecReceiveMessageBuffer.assign(pCtx->nTotalKeys + 1, "");
-    pCtx->vecReceiveMessageMacBuffer.assign(pCtx->nTotalKeys + 1, "");
     pCtx->vecReceiveMessageKeyBuffer.assign(pCtx->nTotalKeys + 1, "");
 
-    // ÖØÖÃ¼ÆÊı
-    pCtx->nValidKeyCnt = 0; //ºÏ·¨µÄÃÜÔ¿×ÜÊı
-    pCtx->nDelayMemoryKeyCnt = 0; //ÑÓ³Ù¼ÇÂ¼ÃÜÔ¿µÄ´ÎÊı
-    pCtx->bIsLostPacket = false; //ÅĞ¶Ï½ÓÊÕ¹ı³ÌÖĞÊÇ·ñ¶ªÆú²»ÔÚºÏ·¨Ê±¼äÄÚµÄ±¨ÎÄ
-    pCtx->nLastKeyIndex = 0; //Âú×é½øĞĞ¾ÛºÏÑéÖ¤µÄ×îºóÒ»¸öÃÜÔ¿ºÅ
-    pCtx->nGroupCnt = 0; //·Ö×éµÄ¸öÊı
+    // é‡ç½®è®¡æ•°
+    pCtx->nValidKeyCnt = 0; //åˆæ³•çš„å¯†é’¥æ€»æ•°
+    pCtx->nDelayMemoryKeyCnt = 0; //å»¶è¿Ÿè®°å½•å¯†é’¥çš„æ¬¡æ•°
+    pCtx->bIsLostPacket = false; //åˆ¤æ–­æ¥æ”¶è¿‡ç¨‹ä¸­æ˜¯å¦ä¸¢å¼ƒä¸åœ¨åˆæ³•æ—¶é—´å†…çš„æŠ¥æ–‡
+    pCtx->nLastKeyIndex = 0; //æ»¡ç»„è¿›è¡ŒèšåˆéªŒè¯çš„æœ€åä¸€ä¸ªå¯†é’¥å·
+    pCtx->nGroupCnt = 0; //åˆ†ç»„çš„ä¸ªæ•°
+    pCtx->nRecvTauIndex = 0;
+    pCtx->nLastTauIndex = 0;
 }
 
-//Ã¿¸öÊı¾İ°üµÄ´¦ÀíÂß¼­
-static void HandlePacketForSender(const string& strSenderId, const TeslaProtocolPacket& protocolPacket) 
+//æ¯ä¸ªæ•°æ®åŒ…çš„å¤„ç†é€»è¾‘
+static void HandlePacketForSender(const string& strSenderId, const TeslaProtocolPacket& protocolPacket)
 {
     auto pCtx = GetOrCreateCtx(strSenderId);
     //pCtx->tpLastTouch = std::chrono::steady_clock::now();
 
-    int keyIndex = 0;
+    int nKeyIndex = -1;
 
-    //¹ÀËã·¢ËÍ·½µÄÊ±¼äÉÏ½ç£¬È·ÈÏÊÕµ½µÄÊı¾İ°üÊÇ²»ÊÇºÏ·¨Ê±¼ä¶ÎÄÚÊÕµ½µÄ
-    long long now = lCurrentTimeMillis();
-    int sender_interval = nComputeSenderUpperBoundInterval(now % (pCtx->nTotalKeys * pCtx->nIntervalLengthMs), pCtx->nIntervalLengthMs, pCtx->lDeltaMs);
-    if (sender_interval > protocolPacket.nIndex + pCtx->nDelay)
-    {
-        cout << "[Not Safe] No." << protocolPacket.nIndex << " Packet May Have Been Exposed, Abandon!" << endl;
-        
-        return ;
-    }
-    else
-    {
-        cout << "[SAFE] No." << protocolPacket.nIndex << " Packet Is Valid, Continue!" << endl;
-    }
+    ////ä¼°ç®—å‘é€æ–¹çš„æ—¶é—´ä¸Šç•Œï¼Œç¡®è®¤æ”¶åˆ°çš„æ•°æ®åŒ…æ˜¯ä¸æ˜¯åˆæ³•æ—¶é—´æ®µå†…æ”¶åˆ°çš„
+    //long long now = lCurrentTimeMillis();
+    //int sender_interval = nComputeSenderUpperBoundInterval(now % (pCtx->nTotalKeys * pCtx->nIntervalLengthMs), pCtx->nIntervalLengthMs, pCtx->lDeltaMs);
+    //if (sender_interval > protocolPacket.nIndex + pCtx->nDelay)
+    //{
+    //    cout << "[Not Safe] No." << protocolPacket.nIndex << " Packet May Have Been Exposed, Abandon!" << endl;
+
+    //    return;
+    //}
+    //else
+    //{
+    //    cout << "[SAFE] No." << protocolPacket.nIndex << " Packet Is Valid, Continue!" << endl;
+    //}
 
 
-    
-    //ÃÜÔ¿ÅûÂ¶Ö®Ç°
+
+    //å¯†é’¥æŠ«éœ²ä¹‹å‰
     if (protocolPacket.strDisclosedKey == "zero")
     {
         cout << "No." << protocolPacket.nIndex
             << " Packet Received, Key Not Yet Disclosed" << endl;
         pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
-        pCtx->vecReceiveMessageMacBuffer[protocolPacket.nIndex] = protocolPacket.strMac;
     }
     else
     {
@@ -780,129 +1142,77 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             return;
         }
 
-        keyIndex = protocolPacket.nIndex - pCtx->nDelay + 1;
-        if (keyIndex < 0 || keyIndex >= pCtx->nTotalKeys) {
-            cerr << "Key index out of range: " << keyIndex << endl;
+        nKeyIndex = protocolPacket.nIndex - pCtx->nDelay + 1;
+        if (nKeyIndex < 0 || nKeyIndex >= pCtx->nTotalKeys) {
+            cerr << "Key index out of range: " << nKeyIndex << endl;
             return;
         }
 
-        
-        if (!pCtx->vecReceiveMessageBuffer[keyIndex].empty() && !pCtx->vecReceiveMessageMacBuffer[keyIndex].empty())
+        if (protocolPacket.vecSamdTau.empty())
         {
-            pCtx->vecReceiveMessageKeyBuffer[keyIndex] = protocolPacket.strDisclosedKey;
+            pCtx->vecReceiveMessageKeyBuffer[nKeyIndex] = protocolPacket.strDisclosedKey;
+            pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
             ++pCtx->nValidKeyCnt;
-            cout << "Key slot " << keyIndex << " received ("
+            cout << "Key slot " << nKeyIndex << " received ("
                 << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
         }
         else
         {
-            for (int i = 1; i < keyIndex; i++)
-            {
-                if (pCtx->vecReceiveMessageKeyBuffer[i].empty() &&
-                    !pCtx->vecReceiveMessageBuffer[i].empty() &&
-                    !pCtx->vecReceiveMessageMacBuffer[i].empty())
-                {
-                    pCtx->vecReceiveMessageKeyBuffer[i] = strDerivePastKeyForInterval(protocolPacket.strDisclosedKey, i, keyIndex);
-                    ++pCtx->nValidKeyCnt;
-                }
-            }
-        }
-        
-
-        if (!protocolPacket.strMessage.empty() && !protocolPacket.strMac.empty()) {
+            pCtx->vecSamdTau = protocolPacket.vecSamdTau;
+            pCtx->vecReceiveMessageKeyBuffer[nKeyIndex] = protocolPacket.strDisclosedKey;
             pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
-            pCtx->vecReceiveMessageMacBuffer[protocolPacket.nIndex] = protocolPacket.strMac;
-        }
-
-    }
-
-    if (pCtx->nValidKeyCnt % N_GROUP_SIZE == 0 && pCtx->nValidKeyCnt > 0)
-    {
-        int nUpsertCnt = 0;
-        int nCurrentIndex = keyIndex;
-        pCtx->nGroupCnt++;
-        while (nUpsertCnt < N_GROUP_SIZE)
-        {
-            if (!pCtx->vecReceiveMessageBuffer[nCurrentIndex].empty() &&
-                !pCtx->vecReceiveMessageMacBuffer[nCurrentIndex].empty() &&
-                !pCtx->vecReceiveMessageKeyBuffer[nCurrentIndex].empty())
-            {
-                UpsertSlotIntoGroup(
-                    strSenderId,
-                    pCtx->nGroupCnt,
-                    nCurrentIndex,
-                    pCtx->vecReceiveMessageBuffer[nCurrentIndex],
-                    pCtx->vecReceiveMessageMacBuffer[nCurrentIndex],
-                    pCtx->vecReceiveMessageKeyBuffer[nCurrentIndex],
-                    pCtx->strContext
-                );
-                nUpsertCnt++;
-            }
-            nCurrentIndex--;
+            pCtx->nRecvTauIndex = protocolPacket.nIndex;
+            ++pCtx->nValidKeyCnt;
+            cout << "Key slot " << nKeyIndex << " received ("
+                << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
         }
     }
 
-    // Ã¿ÂÖ¼ì²éÒ»´Î×é³¬Ê±£¨ÓÃÓÚ¶ª°ü´¦Àí£©
-    //CheckAllGroupsTimeout();
-    /*chrono::steady_clock::time_point now = chrono::steady_clock::now();
-    GroupBucket& gb = g_groups[pCtx->nGroupCnt];*/
-
-    if (protocolPacket.nIndex == pCtx->nTotalKeys + 1)
+    if (pCtx->nRecvTauIndex == nKeyIndex)
     {
         pCtx->nGroupCnt++;
-        int nUpsertCnt = pCtx->nValidKeyCnt % N_GROUP_SIZE;
-        int nCurrentIndex = keyIndex;
-        while (nUpsertCnt > 0)
+        for (int i = pCtx->nLastTauIndex + 1; i <= pCtx->nRecvTauIndex; i++)
         {
-            if (!pCtx->vecReceiveMessageBuffer[nCurrentIndex].empty() &&
-                !pCtx->vecReceiveMessageMacBuffer[nCurrentIndex].empty() &&
-                !pCtx->vecReceiveMessageKeyBuffer[nCurrentIndex].empty())
-            {
-                UpsertSlotIntoGroup(
-                    strSenderId,
-                    pCtx->nGroupCnt,
-                    nCurrentIndex,
-                    pCtx->vecReceiveMessageBuffer[nCurrentIndex],
-                    pCtx->vecReceiveMessageMacBuffer[nCurrentIndex],
-                    pCtx->vecReceiveMessageKeyBuffer[nCurrentIndex],
-                    pCtx->strContext
-                );
-                nUpsertCnt--;
-            }
-            nCurrentIndex--;
+            UpsertSlotIntoGroup(
+                strSenderId,
+                pCtx->nGroupCnt,
+                i,
+                pCtx->vecReceiveMessageBuffer[i],
+                pCtx->vecReceiveMessageKeyBuffer[i],
+                pCtx->vecSamdTau,
+                pCtx->strContext
+            );
         }
 
-        // ÊÖ¶¯´¥·¢¸Ã×éµÄ×îÖÕ flush£¨¼´Ê¹Î´Âú£©
-        int group_id = pCtx->nGroupCnt;
-        FlushGroup(strSenderId, group_id);
+        pCtx->nLastTauIndex = pCtx->nRecvTauIndex;
     }
 }
 
-//Init ¼àÌıÏß³Ì£¨9999£©Ñ­»·µ÷ÓÃbReceiveInitPacketÒÔÈ·±£ÄÜ¹»½ÓÊÕµ½Ã¿¸öĞÂµÄ·¢ËÍ¶ËµÄinit
+//Init ç›‘å¬çº¿ç¨‹ï¼ˆ9999ï¼‰å¾ªç¯è°ƒç”¨bReceiveInitPacketä»¥ç¡®ä¿èƒ½å¤Ÿæ¥æ”¶åˆ°æ¯ä¸ªæ–°çš„å‘é€ç«¯çš„init
 static void ThreadListenLoop_Init() 
 {
     while (g_bRunning.load()) {
         TeslaInitPacket initPkt;
         if (!bReceiveInitPacket(initPkt, 9999))
         {
-            // ¿ÉĞ¡Ë¯Ò»ÏÂ±ÜÃâ¿Õ×ª
+            // å¯å°ç¡ä¸€ä¸‹é¿å…ç©ºè½¬
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
         string strSenderId = initPkt.strSenderId;
-        // 1) ×¢²á strand & ±ê¼ÇÎªÒÑÖª sender
+        // 1) æ³¨å†Œ strand & æ ‡è®°ä¸ºå·²çŸ¥ sender
         EnsureStrandExists(strSenderId);
         MarkSenderKnown(strSenderId);
 
-        // 2) °Ñ¡°³õÊ¼»¯´¦Àí¡±Í¶µİµ½¸Ã sender µÄ strand
+        // 2) æŠŠâ€œåˆå§‹åŒ–å¤„ç†â€æŠ•é€’åˆ°è¯¥ sender çš„ strand
         PostToSender(strSenderId, [strSenderId, initPkt] {
             HandleInitForSender(strSenderId, initPkt);
             });
     }
 }
 
-//Êı¾İ°ü¼àÌıÏß³Ì£¬Ñ­»·µ÷ÓÃ bReceiveProtocolPacket
+//æ•°æ®åŒ…ç›‘å¬çº¿ç¨‹ï¼Œå¾ªç¯è°ƒç”¨ bReceiveProtocolPacket
 static void ThreadListenLoop_UDP() 
 {
     while (g_bRunning.load()) 
@@ -910,20 +1220,20 @@ static void ThreadListenLoop_UDP()
         TeslaProtocolPacket stPkt;
         if (!bReceiveProtocolPacket(stPkt, 7777)) 
         {
-            // ¿ÉĞ¡Ë¯Ò»ÏÂ±ÜÃâ¿Õ×ª
+            // å¯å°ç¡ä¸€ä¸‹é¿å…ç©ºè½¬
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        //Î´×¢²á sender Ö±½Ó¶ªÆú
+        //æœªæ³¨å†Œ sender ç›´æ¥ä¸¢å¼ƒ
         string strSenderId = stPkt.strSenderId;
         if (!IsSenderKnown(strSenderId)) {
             std::cerr << "[DataListen] drop unknown sender: " << strSenderId << "\n";
             continue;
         }
-        //È·±£ strand ´æÔÚ£¨ÀíÂÛÉÏ Init Ê±ÒÑ´´½¨£¬ÕâÀïÖ»ÊÇ¶µµ×£©
+        //ç¡®ä¿ strand å­˜åœ¨ï¼ˆç†è®ºä¸Š Init æ—¶å·²åˆ›å»ºï¼Œè¿™é‡Œåªæ˜¯å…œåº•ï¼‰
         EnsureStrandExists(strSenderId);
 
-        //°Ñ¸Ã°üÍ¶µİµ½¡°per-sender ´®ĞĞÍ¨µÀ¡±£¬µ÷ÓÃÒÑÓĞµÄ HandlePacketForSender
+        //æŠŠè¯¥åŒ…æŠ•é€’åˆ°â€œper-sender ä¸²è¡Œé€šé“â€ï¼Œè°ƒç”¨å·²æœ‰çš„ HandlePacketForSender
         PostToSender(strSenderId, [strSenderId, stPkt] {HandlePacketForSender(strSenderId, stPkt);});
     }
 }
@@ -938,21 +1248,21 @@ int main() {
         return -1;
     }
 #endif
-    //½ÓÊÕTESLAĞ­ÒéÊı¾İ°ü£¬´ıÍê³É
-    /*receiverÑéÖ¤¹¦ÄÜ
-     *1¡¢¼ÆËãÊ±¼äÉÏ½ç£¬´ò¿ªÊı¾İ°ü¼ì²éindex£¬ÅĞ¶ÏÊÇ·ñÊÇºÏ·¨µÄÊı¾İ°ü ¡Ì
-     *2¡¢Èôµ±Ç°Êı¾İ°üindexÒÑ´ïµ½ÃÜÔ¿ÅûÂ¶µÄÊı¾İ°ü£¬ÔòÄÃ³öÃÜÔ¿°´ÕÕ³õÊ¼½×¶Îsender·¢ËÍµÄFºÍK0ÑéÖ¤ÃÜÔ¿ÊÇ·ñºÏ·¨ ¡Ì
-     *3¡¢ÀûÓÃF¡®½«ÅûÂ¶µÄÃÜÔ¿¼ÆËãMACÃÜÔ¿£¬½«ÊôÓÚ¸ÃÃÜÔ¿µÄmessage¼ÆËãHMACÅĞ¶ÏÓë´«À´µÄMACÊÇ·ñÏàÍ¬ ¡Ì
+    //æ¥æ”¶TESLAåè®®æ•°æ®åŒ…ï¼Œå¾…å®Œæˆ
+    /*receiveréªŒè¯åŠŸèƒ½
+     *1ã€è®¡ç®—æ—¶é—´ä¸Šç•Œï¼Œæ‰“å¼€æ•°æ®åŒ…æ£€æŸ¥indexï¼Œåˆ¤æ–­æ˜¯å¦æ˜¯åˆæ³•çš„æ•°æ®åŒ… âˆš
+     *2ã€è‹¥å½“å‰æ•°æ®åŒ…indexå·²è¾¾åˆ°å¯†é’¥æŠ«éœ²çš„æ•°æ®åŒ…ï¼Œåˆ™æ‹¿å‡ºå¯†é’¥æŒ‰ç…§åˆå§‹é˜¶æ®µsenderå‘é€çš„Få’ŒK0éªŒè¯å¯†é’¥æ˜¯å¦åˆæ³• âˆš
+     *3ã€åˆ©ç”¨Fâ€˜å°†æŠ«éœ²çš„å¯†é’¥è®¡ç®—MACå¯†é’¥ï¼Œå°†å±äºè¯¥å¯†é’¥çš„messageè®¡ç®—HMACåˆ¤æ–­ä¸ä¼ æ¥çš„MACæ˜¯å¦ç›¸åŒ âˆš
      */
 
     g_pThreadPool.reset(new CThreadPool(g_nWorkerThreads));
 
-    // 2) Æô¶¯¼àÌıÏß³Ì£¨UDP 7777£©
+    // 2) å¯åŠ¨ç›‘å¬çº¿ç¨‹ï¼ˆUDP 7777ï¼‰
     g_bRunning.store(true);
     thread thInit(ThreadListenLoop_Init);
     thread thData(ThreadListenLoop_UDP);
 
-    // 3) Æô¶¯ºóÌ¨»ØÊÕÏß³Ì£¨¿ÉÑ¡£©
+    // 3) å¯åŠ¨åå°å›æ”¶çº¿ç¨‹ï¼ˆå¯é€‰ï¼‰
     thread thGc([&]
     {
         while (g_bRunning.load()) 
@@ -962,16 +1272,16 @@ int main() {
         }
     });
 
-    // 4) µÈ´ı¡°½áÊøÌõ¼ş¡±
+    // 4) ç­‰å¾…â€œç»“æŸæ¡ä»¶â€
     while (true) 
     {
         this_thread::sleep_for(chrono::seconds(1));
-        // Èç¹ûÄãÓĞ¡°ÊÕµ½ index == nTotalKeys + 1¡±µÄ½áÊø±êÖ¾£¬¿ÉÒÔÔÚ HandlePacketForSender ÀïÉèÖÃÒ»¸öÔ­×Ó±êÖ¾Î»
-        // È»ºóÔÚÕâÀï¼ì²âÄÇ¸ö±êÖ¾Î»£¬Ìø³öÑ­»·¡£
+        // å¦‚æœä½ æœ‰â€œæ”¶åˆ° index == nTotalKeys + 1â€çš„ç»“æŸæ ‡å¿—ï¼Œå¯ä»¥åœ¨ HandlePacketForSender é‡Œè®¾ç½®ä¸€ä¸ªåŸå­æ ‡å¿—ä½
+        // ç„¶ååœ¨è¿™é‡Œæ£€æµ‹é‚£ä¸ªæ ‡å¿—ä½ï¼Œè·³å‡ºå¾ªç¯ã€‚
         // if (g_bFinished.load()) break;
     }
 
-    // 5) Í£»ú£ºÊÕÎ²
+    // 5) åœæœºï¼šæ”¶å°¾
     g_bRunning.store(false);
     if (thInit.joinable())
     {
