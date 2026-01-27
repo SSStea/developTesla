@@ -1090,8 +1090,8 @@ static void HandleInitForSender(const string& strSenderId, const TeslaInitPacket
     pCtx->lDeltaMs = lEstimateTimeOffset(initPkt);//估算发送方时间上界的Δ
 
     // 重新分配缓冲，长度 = N + 1（与你原逻辑一致）
-    pCtx->vecReceiveMessageBuffer.assign(pCtx->nTotalKeys + 1, "");
-    pCtx->vecReceiveMessageKeyBuffer.assign(pCtx->nTotalKeys + 1, "");
+    pCtx->vecReceiveMessageBuffer.assign(pCtx->nTotalKeys + 2, "");
+    pCtx->vecReceiveMessageKeyBuffer.assign(pCtx->nTotalKeys + 2, "");
 
     // 重置计数
     pCtx->nValidKeyCnt = 0; //合法的密钥总数

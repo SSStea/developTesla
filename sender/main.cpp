@@ -596,7 +596,7 @@ void Samd_DSeqAgg(const vector<string>& vecMACs, vector<string>& vecTauOut)
         {
             if (g_SamdKSGt.G[i][j] == 1)
             {
-                vecTemp.push_back(vecMACs[i]);
+                vecTemp.push_back(vecMACs[j]);
             }
         }
         
