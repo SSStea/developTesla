@@ -537,20 +537,6 @@ static void EnsureStrandExists(const string& strSenderId) {
     }
 }
 
-void print_hash(string p)
-{
-    for (unsigned int i = 0; i < p.size(); ++i) {
-        printf("%02x", static_cast<unsigned char>(p[i]));  // 小写 16 进制格式
-    }
-}
-
-void print_packet(const TeslaProtocolPacket& ppacket)
-{
-    cout << "[Packet : Index " << ppacket.nIndex << " | Message = "
-        << ppacket.strMessage/*<< " | MAC = " << ppacket.strMac*/ << " | Key = "
-        << ppacket.strDisclosedKey << "]" << endl << endl;
-}
-
 string strToHexString(const unsigned char* data, size_t nlength)
 {
     static const char hex_chars[] = "0123456789abcdef";
@@ -613,95 +599,6 @@ bool bIsValidKey(const string& strPKey, const string& strKeyZero, int nTotalkeys
     }
 
     return bResult;
-}
-
-string strDerivePastKeyForInterval(const string& strDisclosedKey, int nLostKeyIndex, int nDisclosedKeyIndex)
-{
-    int nComputeTimes = nDisclosedKeyIndex - nLostKeyIndex;
-    string strSomeKey = strDisclosedKey;
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-
-    for (int i = 0; i < nComputeTimes; i++)
-    {
-        SHA256((unsigned char*)strSomeKey.c_str(), strSomeKey.size(), hash);
-        strSomeKey = strToHexString(hash, SHA256_DIGEST_LENGTH);
-    }
-
-    return strSomeKey;
-}
-
-bool bReceiveInitPacket(TeslaInitPacket& packet, int port)
-{
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0)
-    {
-        cout << "Receive Protocol Packet Socket Create Failed!" << endl;
-        return false;
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sockfd, (sockaddr*)&addr, (int)sizeof(addr)) < 0)
-    {
-        cout << "Bind Failed!" << endl;
-        return false;
-    }
-    char buffer[2048];
-    sockaddr_in senderAddr;
-    socklen_t len = sizeof(senderAddr);
-
-    ssize_t recvLen = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0,
-        (sockaddr*)&senderAddr, &len);
-    buffer[recvLen] = '\0';
-
-    json received = json::parse(buffer);
-    packet = TeslaInitPacket::from_json(received);
-
-    CLOSESOCKET(sockfd);
-
-    return true;
-}
-
-bool bReceiveProtocolPacket(TeslaProtocolPacket& packet, int port)
-{
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0)
-    {
-        cout << "Receive Protocol Packet Socket Create Failed!" << endl;
-        return false;
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sockfd, (sockaddr*)&addr, (int)sizeof(addr)) < 0)
-    {
-        cout << "Bind Failed!" << endl;
-        CLOSESOCKET(sockfd);
-        return false;
-    }
-    char buffer[2048];
-    sockaddr_in senderAddr;
-    socklen_t len = sizeof(senderAddr);
-
-    ssize_t recvLen = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0,
-        (sockaddr*)&senderAddr, &len);
-    if (recvLen <= 0)
-    {
-        return false;
-    }
-
-    buffer[recvLen] = '\0';
-
-    json received = json::parse(buffer);
-    packet = TeslaProtocolPacket::from_json(received);
-
-    CLOSESOCKET(sockfd);
-
-    return true;
 }
 
 static string strToHex(const string& strInput) {
@@ -1535,70 +1432,6 @@ int nSerialOpen(const string& port, int baudrate)
     return fd;
 }
 
-bool bSerialReceivePacket(TeslaProtocolPacket& packet, int serial_fd)
-{
-    static string buffer;
-
-    char temp[512];
-    ssize_t n = read(serial_fd, temp, sizeof(temp));
-
-    if (n <= 0)
-        return false;
-
-    buffer.append(temp, (size_t)n);
-
-    size_t pos = buffer.find('\n');
-
-    if (pos == string::npos)
-        return false;
-
-    string line = buffer.substr(0, pos);
-    buffer.erase(0, pos + 1);
-
-    try
-    {
-        json j = json::parse(line);
-        packet = TeslaProtocolPacket::from_json(j);
-        return true;
-    }
-    catch (...)
-    {
-        return false;
-    }
-}
-
-bool bSerialReceiveInit(TeslaInitPacket& packet, int serial_fd)
-{
-    static string buffer;
-
-    char temp[512];
-    ssize_t n = read(serial_fd, temp, sizeof(temp));
-
-    if (n <= 0)
-        return false;
-
-    buffer.append(temp, (size_t)n);
-
-    size_t pos = buffer.find('\n');
-
-    if (pos == string::npos)
-        return false;
-
-    string line = buffer.substr(0, pos);
-    buffer.erase(0, pos + 1);
-
-    try
-    {
-        json j = json::parse(line);
-        packet = TeslaInitPacket::from_json(j);
-        return true;
-    }
-    catch (...)
-    {
-        return false;
-    }
-}
-
 bool bSerialReadLine(int nSerialFd, string& strLine)
 {
     static string strBuffer;
@@ -1723,58 +1556,6 @@ static void ThreadListenLoop_Serial(int nSerialFd)
         }
     }
 }
-
-//Init 监听线程（9999）循环调用bReceiveInitPacket以确保能够接收到每个新的发送端的init
-static void ThreadListenLoop_Init(int serial_fd)
-{
-    while (g_bRunning.load()) {
-        TeslaInitPacket initPkt;
-        if (!bSerialReceiveInit(initPkt, serial_fd))
-        {
-            // 可小睡一下避免空转
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-
-        string strSenderId = initPkt.strSenderId;
-        // 1) 注册 strand & 标记为已知 sender
-        EnsureStrandExists(strSenderId);
-        MarkSenderKnown(strSenderId);
-
-        // 2) 把“初始化处理”投递到该 sender 的 strand
-        PostToSender(strSenderId, [strSenderId, initPkt] {
-            HandleInitForSender(strSenderId, initPkt);
-            });
-    }
-}
-
-//数据包监听线程，循环调用 bReceiveProtocolPacket
-static void ThreadListenLoop_UDP(int serial_fd)
-{
-    while (g_bRunning.load())
-    {
-        TeslaProtocolPacket stPkt;
-        if (!bSerialReceivePacket(stPkt, serial_fd))
-        {
-            // 可小睡一下避免空转
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        //未注册 sender 直接丢弃
-        string strSenderId = stPkt.strSenderId;
-        if (!IsSenderKnown(strSenderId)) {
-            printLocalLog("SERIAL_RX", "drop unknown sender packet, senderId=" + strSenderId);
-            continue;
-        }
-        //确保 strand 存在（理论上 Init 时已创建，这里只是兜底）
-        EnsureStrandExists(strSenderId);
-
-        //把该包投递到“per-sender 串行通道”，调用已有的 HandlePacketForSender
-        PostToSender(strSenderId, [strSenderId, stPkt] {HandlePacketForSender(strSenderId, stPkt); });
-    }
-}
-
-
 
 int main(int argc, char* argv[]) {
     initLocalNodeId(argc, argv);

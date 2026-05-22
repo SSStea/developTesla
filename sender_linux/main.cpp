@@ -106,24 +106,6 @@ struct TeslaInitPacket {
     }
 };
 
-void print_hash(string p) {
-    for (unsigned int i = 0; i < p.size(); ++i) {
-        printf("%02x", static_cast<unsigned char>(p[i]));  // 小写 16 进制格式
-    }
-}
-
-void print_packet(const TeslaProtocolPacket& ppacket) {
-    cout << "[Packet : Index " << ppacket.nIndex << " | Message = "
-        << ppacket.strMessage << /*" | MAC = " << ppacket.strMac <<*/ " | Key = "
-        << ppacket.strDisclosedKey << "]" << endl;
-}
-
-void printVector(const vector<string>& vec) {
-    for (const auto& s : vec) {
-        cout << s << endl;
-    }
-}
-
 //将二进制数据转化为可读的字符串
 string strToHexString(const unsigned char* data, size_t nlength) {
     static const char hex_chars[] = "0123456789abcdef";
@@ -380,100 +362,6 @@ void sendManagementEventSerial(int serial_fd, const string& strType, const json&
 
     writeJsonLineSerial(serial_fd, jsonEvent);
     printLocalLog("EVENT_TX", "type=" + strType + ", payload=" + jsonPayload.dump());
-}
-
-//利用UDP交换数据，以下是端到端和广播两种通信方式
-bool bSendInitPacket_P2P(const TeslaInitPacket& packet, const string& strIP = "192.168.1.100", int port = 8888) {
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        cout << "Send Init Packet Socket Create Failed!" << endl;
-        return false;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-
-#ifdef _WIN32
-    inet_pton(AF_INET, strIP.c_str(), &addr.sin_addr);
-#else
-    inet_pton(AF_INET, strIP.c_str(), &addr.sin_addr);
-#endif
-
-    string data = packet.to_json().dump();
-    sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-
-    CLOSESOCKET(sockfd);
-
-    return true;
-}
-
-bool bSendInitPacket_Broadcast(const TeslaInitPacket& packet, int port = 9999) {
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        cout << "Send Init Packet Socket Create Failed!" << endl;
-        return false;
-    }
-    int optval = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, (const char*)&optval, sizeof(optval));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    addr.sin_addr.s_addr = INADDR_BROADCAST;
-
-    string data = packet.to_json().dump();
-    sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-
-    CLOSESOCKET(sockfd);
-
-    return true;
-}
-
-//通过UDP发送协议数据包，以下是P2P和广播两种方式
-bool bSendProtocolPacket_P2P(const TeslaProtocolPacket& packet, const string& strIP = "192.168.1.100", int port = 8888) {
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        cout << "Send Protocol Packet Socket Create Failed!" << endl;
-        return false;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-#ifdef _WIN32
-    inet_pton(AF_INET, strIP.c_str(), &addr.sin_addr);
-#else
-    inet_pton(AF_INET, strIP.c_str(), &addr.sin_addr);
-#endif
-    std::string data = packet.to_json().dump();
-    sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-
-    CLOSESOCKET(sockfd);
-
-    return true;
-}
-
-bool bSendProtocolPacket_Broadcast(const TeslaProtocolPacket& packet, int port = 7777) {
-    socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        cout << "Send Protocol Packet Socket Create Failed!" << endl;
-        return false;
-    }
-    int optval = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, (const char*)&optval, sizeof(optval));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    addr.sin_addr.s_addr = INADDR_BROADCAST;
-
-    string data = packet.to_json().dump();
-    sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-
-    CLOSESOCKET(sockfd);
-
-    return true;
 }
 
 //获取当前时间的函数，用于发送sender在认证信道第一次通信的时间，receiver利用其计算Δ
@@ -888,8 +776,6 @@ void runTeslaAlgorithm(json params, int serial_fd)
             {"context", strContext}
         });
 
-    /*bSendInitPacket_Broadcast(packet);
-    bSendInitPacket_Broadcast(packet, 8888);*/
     this_thread::sleep_for(chrono::seconds(1));
 
 
@@ -924,9 +810,6 @@ void runTeslaAlgorithm(json params, int serial_fd)
 
 
             //vecTeslaQueue[i].strMac = strMessageMAC;
-            //print_hash(MessageMAC);
-            //cout << endl;
-
             vecTeslaQueue[i].strMessage = strSendmessage + to_string(i);
         }
         else {
@@ -947,8 +830,6 @@ void runTeslaAlgorithm(json params, int serial_fd)
                 {"hasTau", !vecTeslaQueue[i].vecSamdTau.empty()},
                 {"disclosedKey", vecTeslaQueue[i].strDisclosedKey == "zero" ? "zero" : "disclosed"}
             });
-        //bSendProtocolPacket_Broadcast(vecTeslaQueue[i]);
-        //bSendProtocolPacket_Broadcast(vecTeslaQueue[i], 6666);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 
