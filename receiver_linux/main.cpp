@@ -192,6 +192,8 @@ long long lCurrentTimeMillis()
         chrono::system_clock::now().time_since_epoch()).count();
 }
 
+void printLocalLog(const string& strScope, const string& strMessage);
+
 //int nComputeSenderUpperBoundInterval(long long receiverTimeMs, int intervalLengthMs, int deltaMs)
 //{
 //    return (receiverTimeMs + deltaMs) / intervalLengthMs;
@@ -201,9 +203,10 @@ long long lEstimateTimeOffset(const TeslaInitPacket& initPkt)
 {
     long long recvTime = lCurrentTimeMillis();
     long long delta = recvTime - initPkt.lSenderTimestamp;
-    cout << "[TIME SYNC] Sender time = " << initPkt.lSenderTimestamp
-        << ", Receiver time = " << recvTime
-        << ", Estimated delta = " << delta << " ms" << endl;
+    printLocalLog("TIME_SYNC",
+        "senderTime=" + to_string(initPkt.lSenderTimestamp)
+        + ", receiverTime=" + to_string(recvTime)
+        + ", deltaMs=" + to_string(delta));
     return delta;
 }
 
@@ -1267,10 +1270,11 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
             {"result", bOk}
         });
 
-    cout << "Sender: " << strSenderId
-        << " [flush] group " << nGroupId
-        << " count=" << gb.items.size()
-        << " result=" << bOk << endl;
+    printLocalLog("GROUP_FLUSH",
+        "senderId=" + strSenderId
+        + ", group=" + to_string(nGroupId)
+        + ", count=" + to_string(gb.items.size())
+        + ", result=" + string(bOk ? "PASS" : "FAIL"));
 
     gb.items.clear(); // 清空该组
 }
@@ -1426,8 +1430,6 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
     //密钥披露之前
     if (protocolPacket.strDisclosedKey == "zero")
     {
-        cout << "No." << protocolPacket.nIndex
-            << " Packet Received, Key Not Yet Disclosed" << endl;
         pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
         sendManagementEventSerial("KEY_PENDING",
             {
@@ -1460,8 +1462,10 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             pCtx->vecReceiveMessageKeyBuffer[nKeyIndex] = protocolPacket.strDisclosedKey;
             pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
             ++pCtx->nValidKeyCnt;
-            cout << "Key slot " << nKeyIndex << " received ("
-                << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
+            printLocalLog("KEY_RX",
+                "slot=" + to_string(nKeyIndex)
+                + ", verified=" + to_string(pCtx->nValidKeyCnt)
+                + ", total=" + to_string(pCtx->nTotalKeys - 1));
             sendManagementEventSerial("KEY_VERIFIED",
                 {
                     {"senderId", strSenderId},
@@ -1477,8 +1481,11 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
             pCtx->nRecvTauIndex = protocolPacket.nIndex;
             ++pCtx->nValidKeyCnt;
-            cout << "Key slot " << nKeyIndex << " received ("
-                << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
+            printLocalLog("KEY_RX",
+                "slot=" + to_string(nKeyIndex)
+                + ", verified=" + to_string(pCtx->nValidKeyCnt)
+                + ", total=" + to_string(pCtx->nTotalKeys - 1)
+                + ", hasTau=true");
             sendManagementEventSerial("KEY_VERIFIED",
                 {
                     {"senderId", strSenderId},
@@ -1556,7 +1563,6 @@ bool bSerialReceivePacket(TeslaProtocolPacket& packet, int serial_fd)
     }
     catch (...)
     {
-        cout << "JSON parse error" << endl;
         return false;
     }
 }
@@ -1609,12 +1615,7 @@ bool bSerialReadLine(int nSerialFd, string& strLine)
         return false;
     }
 
-    string strRawData(chTemp, (size_t)nReadLen);
-    printLocalLog("RAW_RX",
-        "bytes=" + to_string(nReadLen)
-        + ", data=" + strPreviewSerialData(strRawData));
-
-    strBuffer.append(strRawData);
+    strBuffer.append(chTemp, (size_t)nReadLen);
 
     size_t nLinePos = strBuffer.find('\n');
     if (nLinePos == string::npos)
@@ -1624,7 +1625,6 @@ bool bSerialReadLine(int nSerialFd, string& strLine)
 
     strLine = strBuffer.substr(0, nLinePos);
     strBuffer.erase(0, nLinePos + 1);
-    printLocalLog("LINE_RX", strPreviewSerialData(strLine));
 
     return true;
 }
@@ -1673,7 +1673,6 @@ static void ThreadListenLoop_Serial(int nSerialFd)
 
             if (!bIsTeslaBroadcastMessage(jsonMessage))
             {
-                printLocalLog("SERIAL_RX", "ignored non-tesla message: " + jsonMessage.dump());
                 continue;
             }
 
@@ -1681,7 +1680,6 @@ static void ThreadListenLoop_Serial(int nSerialFd)
             {
                 TeslaInitPacket initPkt = TeslaInitPacket::from_json(jsonMessage);
                 string strSenderId = initPkt.strSenderId;
-                printLocalLog("SERIAL_RX", "TESLA_INIT queued, senderId=" + strSenderId);
 
                 EnsureStrandExists(strSenderId);
                 MarkSenderKnown(strSenderId);
@@ -1694,14 +1692,10 @@ static void ThreadListenLoop_Serial(int nSerialFd)
             {
                 TeslaProtocolPacket stPkt = TeslaProtocolPacket::from_json(jsonMessage);
                 string strSenderId = stPkt.strSenderId;
-                printLocalLog("SERIAL_RX",
-                    "TESLA_PACKET queued, senderId=" + strSenderId
-                    + ", index=" + to_string(stPkt.nIndex));
 
                 if (!IsSenderKnown(strSenderId))
                 {
                     printLocalLog("SERIAL_RX", "drop unknown sender packet, senderId=" + strSenderId);
-                    std::cerr << "[DataListen] drop unknown sender: " << strSenderId << "\n";
                     sendManagementEventSerial("LOG",
                         {
                             {"level", "WARN"},
@@ -1769,7 +1763,7 @@ static void ThreadListenLoop_UDP(int serial_fd)
         //未注册 sender 直接丢弃
         string strSenderId = stPkt.strSenderId;
         if (!IsSenderKnown(strSenderId)) {
-            std::cerr << "[DataListen] drop unknown sender: " << strSenderId << "\n";
+            printLocalLog("SERIAL_RX", "drop unknown sender packet, senderId=" + strSenderId);
             continue;
         }
         //确保 strand 存在（理论上 Init 时已创建，这里只是兜底）
@@ -1804,14 +1798,12 @@ int main(int argc, char* argv[]) {
 
     if (serial_fd < 0)
     {
-        cout << "Serial open failed" << endl;
         printLocalLog("SERIAL", "open /dev/ttyUSB0 failed");
         return -1;
     }
     printLocalLog("SERIAL", "open /dev/ttyUSB0 success, baud=57600");
 
     g_pThreadPool.reset(new CThreadPool(g_nWorkerThreads));
-    printLocalLog("THREAD_POOL", "workerThreads=" + to_string(g_nWorkerThreads));
 
     // 2) 启动串口监听线程，统一分发 INIT/PACKET，避免两个线程同时读同一串口
     g_bRunning.store(true);

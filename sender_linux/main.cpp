@@ -402,7 +402,6 @@ bool bSendInitPacket_P2P(const TeslaInitPacket& packet, const string& strIP = "1
 
     string data = packet.to_json().dump();
     sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-    cout << "[Sender] Packet sent to " << strIP << ":" << port << endl;
 
     CLOSESOCKET(sockfd);
 
@@ -425,7 +424,6 @@ bool bSendInitPacket_Broadcast(const TeslaInitPacket& packet, int port = 9999) {
 
     string data = packet.to_json().dump();
     sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-    cout << "[Sender:BROADCAST] Packet broadcasted on port " << port << endl;
 
     CLOSESOCKET(sockfd);
 
@@ -472,7 +470,6 @@ bool bSendProtocolPacket_Broadcast(const TeslaProtocolPacket& packet, int port =
 
     string data = packet.to_json().dump();
     sendto(sockfd, data.c_str(), data.size(), 0, (sockaddr*)&addr, sizeof(addr));
-    cout << "[Sender:BROADCAST] Packet broadcasted on port " << port << endl << endl;
 
     CLOSESOCKET(sockfd);
 
@@ -937,8 +934,6 @@ void runTeslaAlgorithm(json params, int serial_fd)
             vecTeslaQueue[i].strMessage = "";
             //vecTeslaQueue[i].strMac = "";
         }
-        print_packet(vecTeslaQueue[i]);
-
         sendProtocolPacketSerial(serial_fd, vecTeslaQueue[i]);
         printLocalLog("TESLA_PACKET_TX",
             "senderId=" + strSenderId
@@ -984,7 +979,6 @@ int main(int argc, char* argv[]) {
 
     if (serial_fd < 0)
     {
-        std::cout << "串口打开失败\n";
         printLocalLog("SERIAL", "open /dev/ttyUSB0 failed");
         return -1;
     }
@@ -1007,9 +1001,6 @@ int main(int argc, char* argv[]) {
         if (n > 0)
         {
             string strRawData(buffer, (size_t)n);
-            printLocalLog("RAW_RX",
-                "bytes=" + to_string(n)
-                + ", data=" + strPreviewSerialData(strRawData));
 
             strSerialBuffer.append(strRawData);
 
@@ -1018,7 +1009,6 @@ int main(int argc, char* argv[]) {
             {
                 string strLine = strSerialBuffer.substr(0, nLinePos);
                 strSerialBuffer.erase(0, nLinePos + 1);
-                printLocalLog("LINE_RX", strPreviewSerialData(strLine));
 
                 if (strLine.empty())
                 {
@@ -1118,7 +1108,6 @@ int main(int argc, char* argv[]) {
                 }
                 catch (...)
                 {
-                    std::cout << "JSON解析失败\n";
                     printLocalLog("JSON_RX", "parse failed, line=" + strPreviewSerialData(strLine));
                     sendManagementEventSerial(serial_fd, "LOG",
                         {
