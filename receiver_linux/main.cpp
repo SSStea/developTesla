@@ -20,6 +20,10 @@
 #include <functional>
 #include <condition_variable>
 #include <atomic>
+#include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#include <algorithm>
 // 是否启用线程化接收（0 = 原有 while/recv 逻辑；1 = 启用监听线程 + 线程池）
 #ifndef USE_THREADED_RECEIVER
 #define USE_THREADED_RECEIVER 1
@@ -56,6 +60,9 @@ const int N_BASE_SLOT = 1; // TESLA 报文从 1 开始编号
 const int N_GROUP_SIZE = 100;
 const int N_DECTECING = 1;
 int serial_fd = 0;
+static mutex g_mtxSerialWrite;
+static mutex g_mtxLogPrint;
+static string g_strLocalNodeId = "uav_receiver_01";
 
 // ===== ADDED: 每个 sender 独立的接收端上下文 =====
 struct SReceiverContext {
@@ -80,6 +87,9 @@ struct SReceiverContext {
     int nGroupCnt = 0;
     int nRecvTauIndex = 0;
     int nLastTauIndex = 0;
+    unordered_set<int> setReceivedPacketIndexes;
+    int nMaxReceivedPacketIndex = 0;
+    int nLossPacketCount = 0;
 
     // 分组聚合需要的时间戳等（可选）
     //std::chrono::steady_clock::time_point tpLastTouch = std::chrono::steady_clock::now();
@@ -195,6 +205,187 @@ long long lEstimateTimeOffset(const TeslaInitPacket& initPkt)
         << ", Receiver time = " << recvTime
         << ", Estimated delta = " << delta << " ms" << endl;
     return delta;
+}
+
+json jsonNormalizeInboundMessage(const json& jsonMessage)
+{
+    if (jsonMessage.contains("payload") && jsonMessage["payload"].is_object())
+    {
+        return jsonMessage["payload"];
+    }
+
+    return jsonMessage;
+}
+
+string strJsonType(const json& jsonMessage)
+{
+    if (jsonMessage.contains("type") && jsonMessage["type"].is_string())
+    {
+        return jsonMessage["type"].get<string>();
+    }
+
+    return "";
+}
+
+string strJsonStringValue(const json& jsonObj, const string& strName, const string& strDefaultValue)
+{
+    if (!jsonObj.contains(strName) || jsonObj[strName].is_null())
+    {
+        return strDefaultValue;
+    }
+
+    if (jsonObj[strName].is_string())
+    {
+        return jsonObj[strName].get<string>();
+    }
+
+    return jsonObj[strName].dump();
+}
+
+void initLocalNodeId(int nArgc, char* argv[])
+{
+    const char* pEnvNodeId = getenv("TESLA_NODE_ID");
+    if (pEnvNodeId != nullptr && string(pEnvNodeId).size() > 0)
+    {
+        g_strLocalNodeId = pEnvNodeId;
+    }
+
+    if (nArgc > 1 && argv[1] != nullptr && string(argv[1]).size() > 0)
+    {
+        g_strLocalNodeId = argv[1];
+    }
+}
+
+bool bMessageForLocalNode(const json& jsonMessage)
+{
+    if (!jsonMessage.contains("dstNodeId") || jsonMessage["dstNodeId"].is_null())
+    {
+        return true;
+    }
+
+    string strDstNodeId = strJsonStringValue(jsonMessage, "dstNodeId", "*");
+    return strDstNodeId == "*" || strDstNodeId == g_strLocalNodeId;
+}
+
+bool bIsManagementMessage(const json& jsonMessage)
+{
+    string strChannel = strJsonStringValue(jsonMessage, "channel", "");
+    string strType = strJsonType(jsonMessage);
+
+    return strChannel == "mgmt"
+        || strType == "PING"
+        || strType == "CONFIG"
+        || strType == "START"
+        || strType == "STOP";
+}
+
+bool bIsTeslaBroadcastMessage(const json& jsonMessage)
+{
+    string strChannel = strJsonStringValue(jsonMessage, "channel", "");
+    if (!strChannel.empty() && strChannel != "tesla")
+    {
+        return false;
+    }
+
+    return bMessageForLocalNode(jsonMessage);
+}
+
+int nBroadcastReplyDelayMs()
+{
+    unsigned int nHash = 0;
+    for (unsigned char chValue : g_strLocalNodeId)
+    {
+        nHash = nHash * 131u + chValue;
+    }
+
+    return 20 + static_cast<int>(nHash % 180u);
+}
+
+void waitBeforeBroadcastReply(const json& jsonMessage)
+{
+    string strDstNodeId = strJsonStringValue(jsonMessage, "dstNodeId", "*");
+    if (strDstNodeId == "*")
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(nBroadcastReplyDelayMs()));
+    }
+}
+
+void printLocalLog(const string& strScope, const string& strMessage)
+{
+    lock_guard<mutex> lockLog(g_mtxLogPrint);
+    cout << "[RECEIVER][" << g_strLocalNodeId << "][" << strScope << "] " << strMessage << endl;
+}
+
+string strPreviewSerialData(const string& strData)
+{
+    stringstream ssHexPreview;
+    ssHexPreview << hex << uppercase << setfill('0');
+
+    size_t nPreviewLen = min<size_t>(strData.size(), 80);
+    for (size_t nIndex = 0; nIndex < nPreviewLen; ++nIndex)
+    {
+        if (nIndex > 0)
+        {
+            ssHexPreview << ' ';
+        }
+
+        ssHexPreview << setw(2) << static_cast<int>(static_cast<unsigned char>(strData[nIndex]));
+    }
+
+    if (strData.size() > nPreviewLen)
+    {
+        ssHexPreview << " ...";
+    }
+
+    return ssHexPreview.str();
+}
+
+void configSerialRawMode(int nSerialFd, termios& tty, int nBaudrate)
+{
+    cfmakeraw(&tty);
+    cfsetispeed(&tty, nBaudrate);
+    cfsetospeed(&tty, nBaudrate);
+
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 1;
+
+    tcflush(nSerialFd, TCIOFLUSH);
+    tcsetattr(nSerialFd, TCSANOW, &tty);
+}
+
+void writeJsonLineSerial(int nSerialFd, const json& jsonMessage)
+{
+    string strData = jsonMessage.dump();
+    strData += "\n";
+
+    lock_guard<mutex> lockSerial(g_mtxSerialWrite);
+    write(nSerialFd, strData.c_str(), strData.size());
+}
+
+void sendManagementEventSerial(const string& strType, const json& jsonPayload = json::object())
+{
+    if (serial_fd <= 0)
+    {
+        return;
+    }
+
+    json jsonEvent = jsonPayload;
+    jsonEvent["channel"] = "event";
+    jsonEvent["srcNodeId"] = g_strLocalNodeId;
+    jsonEvent["dstNodeId"] = "pc";
+    jsonEvent["type"] = strType;
+    jsonEvent["role"] = "receiver";
+    jsonEvent["timestamp"] = lCurrentTimeMillis();
+
+    writeJsonLineSerial(serial_fd, jsonEvent);
+    printLocalLog("EVENT_TX", "type=" + strType + ", payload=" + jsonPayload.dump());
 }
 
 static unordered_map<string, shared_ptr<SSenderStrand>> g_mapStrands; //所有已知sender的串行通道map
@@ -993,6 +1184,40 @@ static bool bVerifyGroupSAMD(
 
 
 
+static int nCountReceivedPacketsInRange(const SReceiverContext& stCtx, int nStartIndex, int nEndIndex)
+{
+    int nReceivedCount = 0;
+    for (int nIndex = nStartIndex; nIndex <= nEndIndex; ++nIndex)
+    {
+        if (stCtx.setReceivedPacketIndexes.count(nIndex) > 0)
+        {
+            ++nReceivedCount;
+        }
+    }
+
+    return nReceivedCount;
+}
+
+static int nCumulativeLossPackets(const SReceiverContext& stCtx)
+{
+    if (stCtx.nMaxReceivedPacketIndex <= 0)
+    {
+        return 0;
+    }
+
+    int nReceivedCount = 0;
+    for (int nIndex : stCtx.setReceivedPacketIndexes)
+    {
+        if (nIndex >= N_BASE_SLOT && nIndex <= stCtx.nMaxReceivedPacketIndex)
+        {
+            ++nReceivedCount;
+        }
+    }
+
+    int nLossCount = stCtx.nMaxReceivedPacketIndex - N_BASE_SLOT + 1 - nReceivedCount;
+    return nLossCount > 0 ? nLossCount : 0;
+}
+
 // 触发聚合并清空该组（满组、超时、结束时都会调用）
 static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& vecRecvTau)
 {
@@ -1008,26 +1233,44 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
 
     vector<int> vecGoodSlots;
     vector<int> vecBadSlots;
+    shared_ptr<SReceiverContext> pCtx = GetOrCreateCtx(strSenderId);
+    int nGroupStartIndex = (nGroupId - 1) * N_GROUP_SIZE + N_BASE_SLOT;
+    int nGroupEndIndex = nGroupId * N_GROUP_SIZE;
+    if (pCtx->nTotalKeys > 0)
+    {
+        nGroupEndIndex = min(nGroupEndIndex, pCtx->nTotalKeys - 1);
+    }
+    int nExpectedCount = nGroupEndIndex >= nGroupStartIndex ? nGroupEndIndex - nGroupStartIndex + 1 : 0;
+    int nReceivedCount = nExpectedCount > 0 ? nCountReceivedPacketsInRange(*pCtx, nGroupStartIndex, nGroupEndIndex) : static_cast<int>(gb.items.size());
+    int nGroupLossCount = nExpectedCount > nReceivedCount ? nExpectedCount - nReceivedCount : 0;
     //const bool bOk = bVerifyGroupSa2(group_id, gb);
     const bool bOk = bVerifyGroupSAMD(nGroupId, gb, vecRecvTau, vecGoodSlots, vecBadSlots);
-    if (bOk)
-    {
-        stringstream ss;
-        ss << "Sender: " << strSenderId
-            << " [flush] group " << nGroupId
-            << " count = " << gb.items.size()
-            << " result = " << bOk;
+    printLocalLog("GROUP_VERIFY",
+        "senderId=" + strSenderId
+        + ", group=" + to_string(nGroupId)
+        + ", expected=" + to_string(nExpectedCount)
+        + ", received=" + to_string(nReceivedCount)
+        + ", valid=" + to_string(static_cast<int>(vecGoodSlots.size()))
+        + ", failed=" + to_string(static_cast<int>(vecBadSlots.size()))
+        + ", loss=" + to_string(nGroupLossCount)
+        + ", result=" + string(bOk ? "PASS" : "FAIL"));
+    sendManagementEventSerial("GROUP_RESULT",
+        {
+            {"senderId", strSenderId},
+            {"group", nGroupId},
+            {"count", nExpectedCount},
+            {"received", nReceivedCount},
+            {"valid", static_cast<int>(vecGoodSlots.size())},
+            {"failed", static_cast<int>(vecBadSlots.size())},
+            {"loss", nGroupLossCount},
+            {"cumulativeLoss", pCtx->nLossPacketCount},
+            {"result", bOk}
+        });
 
-        string strResult = ss.str();
-        strResult += "\n";
-
-        write(serial_fd, strResult.c_str(), strResult.size());
-
-        cout << "Sender: " << strSenderId
-            << " [flush] group " << nGroupId
-            << " count=" << gb.items.size()
-            << " result=" << bOk << endl;
-    }
+    cout << "Sender: " << strSenderId
+        << " [flush] group " << nGroupId
+        << " count=" << gb.items.size()
+        << " result=" << bOk << endl;
 
     gb.items.clear(); // 清空该组
 }
@@ -1115,6 +1358,24 @@ static void HandleInitForSender(const string& strSenderId, const TeslaInitPacket
     pCtx->nGroupCnt = 0; //分组的个数
     pCtx->nRecvTauIndex = 0;
     pCtx->nLastTauIndex = 0;
+    pCtx->setReceivedPacketIndexes.clear();
+    pCtx->nMaxReceivedPacketIndex = 0;
+    pCtx->nLossPacketCount = 0;
+    printLocalLog("TESLA_INIT_RX",
+        "senderId=" + strSenderId
+        + ", keyCount=" + to_string(pCtx->nTotalKeys)
+        + ", delay=" + to_string(pCtx->nDelay)
+        + ", intervalMs=" + to_string(pCtx->nIntervalLengthMs)
+        + ", context=" + pCtx->strContext);
+
+    sendManagementEventSerial("INIT_RECEIVED",
+        {
+            {"senderId", strSenderId},
+            {"keyCount", pCtx->nTotalKeys},
+            {"delay", pCtx->nDelay},
+            {"intervalMs", pCtx->nIntervalLengthMs},
+            {"context", pCtx->strContext}
+        });
 }
 
 //每个数据包的处理逻辑
@@ -1124,6 +1385,27 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
     //pCtx->tpLastTouch = std::chrono::steady_clock::now();
 
     int nKeyIndex = -1;
+    pCtx->setReceivedPacketIndexes.insert(protocolPacket.nIndex);
+    if (protocolPacket.nIndex > pCtx->nMaxReceivedPacketIndex)
+    {
+        pCtx->nMaxReceivedPacketIndex = protocolPacket.nIndex;
+    }
+    pCtx->nLossPacketCount = nCumulativeLossPackets(*pCtx);
+    printLocalLog("TESLA_PACKET_RX",
+        "senderId=" + strSenderId
+        + ", index=" + to_string(protocolPacket.nIndex)
+        + ", disclosedKey=" + protocolPacket.strDisclosedKey
+        + ", hasTau=" + string(protocolPacket.vecSamdTau.empty() ? "false" : "true")
+        + ", loss=" + to_string(pCtx->nLossPacketCount));
+
+    sendManagementEventSerial("PACKET_RECEIVED",
+        {
+            {"senderId", strSenderId},
+            {"index", protocolPacket.nIndex},
+            {"hasTau", !protocolPacket.vecSamdTau.empty()},
+            {"disclosedKey", protocolPacket.strDisclosedKey == "zero" ? "zero" : "disclosed"},
+            {"loss", pCtx->nLossPacketCount}
+        });
 
     ////估算发送方的时间上界，确认收到的数据包是不是合法时间段内收到的
     //long long now = lCurrentTimeMillis();
@@ -1147,12 +1429,23 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
         cout << "No." << protocolPacket.nIndex
             << " Packet Received, Key Not Yet Disclosed" << endl;
         pCtx->vecReceiveMessageBuffer[protocolPacket.nIndex] = protocolPacket.strMessage;
+        sendManagementEventSerial("KEY_PENDING",
+            {
+                {"senderId", strSenderId},
+                {"index", protocolPacket.nIndex}
+            });
     }
     else
     {
         if (!bIsValidKey(protocolPacket.strDisclosedKey, pCtx->strKey0, pCtx->nTotalKeys)) {
             cout << "Received No. " << (protocolPacket.nIndex - pCtx->nDelay)
                 << " Key Error, Not TESLA" << endl;
+            sendManagementEventSerial("KEY_INVALID",
+                {
+                    {"senderId", strSenderId},
+                    {"index", protocolPacket.nIndex},
+                    {"slot", protocolPacket.nIndex - pCtx->nDelay + 1}
+                });
             return;
         }
 
@@ -1169,6 +1462,13 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             ++pCtx->nValidKeyCnt;
             cout << "Key slot " << nKeyIndex << " received ("
                 << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
+            sendManagementEventSerial("KEY_VERIFIED",
+                {
+                    {"senderId", strSenderId},
+                    {"slot", nKeyIndex},
+                    {"verified", pCtx->nValidKeyCnt},
+                    {"total", pCtx->nTotalKeys - 1}
+                });
         }
         else
         {
@@ -1179,6 +1479,14 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             ++pCtx->nValidKeyCnt;
             cout << "Key slot " << nKeyIndex << " received ("
                 << pCtx->nValidKeyCnt << "/" << pCtx->nTotalKeys - 1 << ")" << endl;
+            sendManagementEventSerial("KEY_VERIFIED",
+                {
+                    {"senderId", strSenderId},
+                    {"slot", nKeyIndex},
+                    {"verified", pCtx->nValidKeyCnt},
+                    {"total", pCtx->nTotalKeys - 1},
+                    {"hasTau", true}
+                });
         }
     }
 
@@ -1215,17 +1523,7 @@ int nSerialOpen(const string& port, int baudrate)
     struct termios tty {};
     tcgetattr(fd, &tty);
 
-    cfsetispeed(&tty, baudrate);
-    cfsetospeed(&tty, baudrate);
-
-    tty.c_cflag |= (CLOCAL | CREAD);
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-
-    tcsetattr(fd, TCSANOW, &tty);
+    configSerialRawMode(fd, tty, baudrate);
 
     return fd;
 }
@@ -1295,6 +1593,143 @@ bool bSerialReceiveInit(TeslaInitPacket& packet, int serial_fd)
     }
 }
 
+bool bSerialReadLine(int nSerialFd, string& strLine)
+{
+    static string strBuffer;
+
+    char chTemp[512];
+    ssize_t nReadLen = read(nSerialFd, chTemp, sizeof(chTemp));
+
+    if (nReadLen <= 0)
+    {
+        if (nReadLen < 0)
+        {
+            printLocalLog("SERIAL", "read failed: " + string(strerror(errno)));
+        }
+        return false;
+    }
+
+    string strRawData(chTemp, (size_t)nReadLen);
+    printLocalLog("RAW_RX",
+        "bytes=" + to_string(nReadLen)
+        + ", data=" + strPreviewSerialData(strRawData));
+
+    strBuffer.append(strRawData);
+
+    size_t nLinePos = strBuffer.find('\n');
+    if (nLinePos == string::npos)
+    {
+        return false;
+    }
+
+    strLine = strBuffer.substr(0, nLinePos);
+    strBuffer.erase(0, nLinePos + 1);
+    printLocalLog("LINE_RX", strPreviewSerialData(strLine));
+
+    return true;
+}
+
+static void ThreadListenLoop_Serial(int nSerialFd)
+{
+    while (g_bRunning.load())
+    {
+        string strLine;
+        if (!bSerialReadLine(nSerialFd, strLine))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        try
+        {
+            json jsonMessage = jsonNormalizeInboundMessage(json::parse(strLine));
+            string strType = strJsonType(jsonMessage);
+
+            if (bIsManagementMessage(jsonMessage))
+            {
+                if (!bMessageForLocalNode(jsonMessage))
+                {
+                    printLocalLog("MGMT_RX",
+                        "ignored message, localNodeId=" + g_strLocalNodeId
+                        + ", message=" + jsonMessage.dump());
+                    continue;
+                }
+
+                if (strType == "PING")
+                {
+                    printLocalLog("MGMT_RX", "PING seq=" + to_string(jsonMessage.value("seq", 0)));
+                    waitBeforeBroadcastReply(jsonMessage);
+                    sendManagementEventSerial("PONG",
+                        {
+                            {"senderId", g_strLocalNodeId},
+                            {"seq", jsonMessage.value("seq", 0)},
+                            {"pcTimestampMs", jsonMessage.value("pcTimestampMs", 0LL)},
+                            {"serverTimestampMs", lCurrentTimeMillis()}
+                        });
+                }
+
+                continue;
+            }
+
+            if (!bIsTeslaBroadcastMessage(jsonMessage))
+            {
+                printLocalLog("SERIAL_RX", "ignored non-tesla message: " + jsonMessage.dump());
+                continue;
+            }
+
+            if (strType == "TESLA_INIT" || jsonMessage.contains("strCommitmentKey"))
+            {
+                TeslaInitPacket initPkt = TeslaInitPacket::from_json(jsonMessage);
+                string strSenderId = initPkt.strSenderId;
+                printLocalLog("SERIAL_RX", "TESLA_INIT queued, senderId=" + strSenderId);
+
+                EnsureStrandExists(strSenderId);
+                MarkSenderKnown(strSenderId);
+                PostToSender(strSenderId, [strSenderId, initPkt]
+                    {
+                        HandleInitForSender(strSenderId, initPkt);
+                    });
+            }
+            else if (strType == "TESLA_PACKET" || jsonMessage.contains("nIndex"))
+            {
+                TeslaProtocolPacket stPkt = TeslaProtocolPacket::from_json(jsonMessage);
+                string strSenderId = stPkt.strSenderId;
+                printLocalLog("SERIAL_RX",
+                    "TESLA_PACKET queued, senderId=" + strSenderId
+                    + ", index=" + to_string(stPkt.nIndex));
+
+                if (!IsSenderKnown(strSenderId))
+                {
+                    printLocalLog("SERIAL_RX", "drop unknown sender packet, senderId=" + strSenderId);
+                    std::cerr << "[DataListen] drop unknown sender: " << strSenderId << "\n";
+                    sendManagementEventSerial("LOG",
+                        {
+                            {"level", "WARN"},
+                            {"senderId", strSenderId},
+                            {"message", "drop unknown sender packet"}
+                        });
+                    continue;
+                }
+
+                EnsureStrandExists(strSenderId);
+                PostToSender(strSenderId, [strSenderId, stPkt]
+                    {
+                        HandlePacketForSender(strSenderId, stPkt);
+                    });
+            }
+        }
+        catch (...)
+        {
+            printLocalLog("JSON_RX", "parse failed or dispatch failed, line=" + strPreviewSerialData(strLine));
+            sendManagementEventSerial("LOG",
+                {
+                    {"level", "ERROR"},
+                    {"message", "receiver json parse failed"}
+                });
+        }
+    }
+}
+
 //Init 监听线程（9999）循环调用bReceiveInitPacket以确保能够接收到每个新的发送端的init
 static void ThreadListenLoop_Init(int serial_fd)
 {
@@ -1347,7 +1782,9 @@ static void ThreadListenLoop_UDP(int serial_fd)
 
 
 
-int main() {
+int main(int argc, char* argv[]) {
+    initLocalNodeId(argc, argv);
+    printLocalLog("BOOT", "receiver process starting");
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -1363,20 +1800,22 @@ int main() {
      *3、利用F‘将披露的密钥计算MAC密钥，将属于该密钥的message计算HMAC判断与传来的MAC是否相同 √
      */
 
-    serial_fd = nSerialOpen("/dev/ttyUSB0", B115200);
+    serial_fd = nSerialOpen("/dev/ttyUSB0", B57600);
 
     if (serial_fd < 0)
     {
         cout << "Serial open failed" << endl;
+        printLocalLog("SERIAL", "open /dev/ttyUSB0 failed");
         return -1;
     }
+    printLocalLog("SERIAL", "open /dev/ttyUSB0 success, baud=57600");
 
     g_pThreadPool.reset(new CThreadPool(g_nWorkerThreads));
+    printLocalLog("THREAD_POOL", "workerThreads=" + to_string(g_nWorkerThreads));
 
-    // 2) 启动监听线程（UDP 7777）
+    // 2) 启动串口监听线程，统一分发 INIT/PACKET，避免两个线程同时读同一串口
     g_bRunning.store(true);
-    thread thInit(ThreadListenLoop_Init, serial_fd);
-    thread thData(ThreadListenLoop_UDP, serial_fd);
+    thread thSerial(ThreadListenLoop_Serial, serial_fd);
 
     // 3) 启动后台回收线程（可选）
     thread thGc([&]
@@ -1399,13 +1838,9 @@ int main() {
 
     // 5) 停机：收尾
     g_bRunning.store(false);
-    if (thInit.joinable())
+    if (thSerial.joinable())
     {
-        thInit.join();
-    }
-    if (thData.joinable())
-    {
-        thData.join();
+        thSerial.join();
     }
     if (thGc.joinable())
     {

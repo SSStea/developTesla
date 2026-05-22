@@ -6,6 +6,12 @@
 #include <thread>
 #include <chrono>
 #include <fcntl.h>
+#include <atomic>
+#include <mutex>
+#include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#include <algorithm>
 
 #include "json.hpp"
 #include <openssl/sha.h>
@@ -43,6 +49,14 @@ string strTESLAInitKey = "Hello World";
 string strSendmessage = "TESLA Protocol";
 string strContext = "gen_mac";
 
+static mutex g_mtxSerialWrite;
+static mutex g_mtxLogPrint;
+static atomic<bool> g_bStopRequested{ false };
+static atomic<bool> g_bTeslaRunning{ false };
+static json g_jsonLastConfig;
+static bool g_bHasConfig = false;
+static string g_strLocalNodeId = "uav_sender_01";
+
 //TESLA协议数据包结构体
 struct TeslaProtocolPacket {
     string strSenderId;
@@ -53,7 +67,7 @@ struct TeslaProtocolPacket {
     vector<string> vecSamdTau;
 
     json to_json() const {
-        return json{ {"strSenderId", strSenderId}, {"nIndex", nIndex},
+        return json{ {"channel", "tesla"}, {"srcNodeId", g_strLocalNodeId}, {"dstNodeId", "*"}, {"type", "TESLA_PACKET"}, {"strSenderId", strSenderId}, {"nIndex", nIndex},
             {"strMessage", strMessage}, /*{"strMac", strMac},*/
             {"strDisclosedKey", strDisclosedKey} , {"vecSamdTau", vecSamdTau} };
     }
@@ -75,6 +89,10 @@ struct TeslaInitPacket {
     // 将结构体转为 JSON
     json to_json() const {
         return json{
+                {"channel", "tesla"},
+                {"srcNodeId", g_strLocalNodeId},
+                {"dstNodeId", "*"},
+                {"type", "TESLA_INIT"},
                 {"strSenderId",strSenderId},
                 {"strCommitmentKey", strCommitmentKey},
                 {"strZeroKey", strZeroKey},
@@ -180,6 +198,190 @@ string strComputeMAC(const string& strMessage, const string& strKi, const string
     return strToHexString(result, len);
 }
 
+long long currentTimeMillis();
+
+int nJsonIntValue(const json& jsonObj, const string& strName, int nDefaultValue)
+{
+    if (!jsonObj.contains(strName) || jsonObj[strName].is_null())
+    {
+        return nDefaultValue;
+    }
+
+    if (jsonObj[strName].is_number())
+    {
+        return jsonObj[strName].get<int>();
+    }
+
+    if (jsonObj[strName].is_string())
+    {
+        try
+        {
+            return stoi(jsonObj[strName].get<string>());
+        }
+        catch (...)
+        {
+            return nDefaultValue;
+        }
+    }
+
+    return nDefaultValue;
+}
+
+string strJsonStringValue(const json& jsonObj, const string& strName, const string& strDefaultValue)
+{
+    if (!jsonObj.contains(strName) || jsonObj[strName].is_null())
+    {
+        return strDefaultValue;
+    }
+
+    if (jsonObj[strName].is_string())
+    {
+        return jsonObj[strName].get<string>();
+    }
+
+    return jsonObj[strName].dump();
+}
+
+void initLocalNodeId(int nArgc, char* argv[])
+{
+    const char* pEnvNodeId = getenv("TESLA_NODE_ID");
+    if (pEnvNodeId != nullptr && string(pEnvNodeId).size() > 0)
+    {
+        g_strLocalNodeId = pEnvNodeId;
+    }
+    if (nArgc > 1 && argv[1] != nullptr && string(argv[1]).size() > 0)
+    {
+        g_strLocalNodeId = argv[1];
+    }
+}
+
+bool bMessageForLocalNode(const json& jsonMessage)
+{
+    if (!jsonMessage.contains("dstNodeId") || jsonMessage["dstNodeId"].is_null())
+    {
+        return true;
+    }
+
+    string strDstNodeId = strJsonStringValue(jsonMessage, "dstNodeId", "*");
+    return strDstNodeId == "*" || strDstNodeId == g_strLocalNodeId;
+}
+
+bool bIsManagementMessage(const json& jsonMessage)
+{
+    string strChannel = strJsonStringValue(jsonMessage, "channel", "mgmt");
+    return strChannel == "mgmt";
+}
+
+int nBroadcastReplyDelayMs()
+{
+    unsigned int nHash = 0;
+    for (unsigned char chValue : g_strLocalNodeId)
+    {
+        nHash = nHash * 131u + chValue;
+    }
+
+    return 20 + static_cast<int>(nHash % 180u);
+}
+
+void waitBeforeBroadcastReply(const json& jsonMessage)
+{
+    string strDstNodeId = strJsonStringValue(jsonMessage, "dstNodeId", "*");
+    if (strDstNodeId == "*")
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(nBroadcastReplyDelayMs()));
+    }
+}
+
+void printLocalLog(const string& strScope, const string& strMessage)
+{
+    lock_guard<mutex> lockLog(g_mtxLogPrint);
+    cout << "[SENDER][" << g_strLocalNodeId << "][" << strScope << "] " << strMessage << endl;
+}
+
+string strPreviewSerialData(const string& strData)
+{
+    stringstream ssHexPreview;
+    ssHexPreview << hex << uppercase << setfill('0');
+
+    size_t nPreviewLen = min<size_t>(strData.size(), 80);
+    for (size_t nIndex = 0; nIndex < nPreviewLen; ++nIndex)
+    {
+        if (nIndex > 0)
+        {
+            ssHexPreview << ' ';
+        }
+
+        ssHexPreview << setw(2) << static_cast<int>(static_cast<unsigned char>(strData[nIndex]));
+    }
+
+    if (strData.size() > nPreviewLen)
+    {
+        ssHexPreview << " ...";
+    }
+
+    return ssHexPreview.str();
+}
+
+void configSerialRawMode(int serial_fd, termios& tty)
+{
+    cfmakeraw(&tty);
+    cfsetispeed(&tty, B57600);
+    cfsetospeed(&tty, B57600);
+
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 1;
+
+    tcflush(serial_fd, TCIOFLUSH);
+    tcsetattr(serial_fd, TCSANOW, &tty);
+}
+
+json jsonNormalizeConfig(const json& jsonMessage)
+{
+    if (jsonMessage.contains("payload") && jsonMessage["payload"].is_object())
+    {
+        return jsonMessage["payload"];
+    }
+
+    return jsonMessage;
+}
+
+bool bIsMessageType(const json& jsonMessage, const string& strType)
+{
+    return jsonMessage.contains("type")
+        && jsonMessage["type"].is_string()
+        && jsonMessage["type"].get<string>() == strType;
+}
+
+void writeJsonLineSerial(int serial_fd, const json& jsonMessage)
+{
+    string strData = jsonMessage.dump();
+    strData += "\n";
+
+    lock_guard<mutex> lockSerial(g_mtxSerialWrite);
+    write(serial_fd, strData.c_str(), strData.size());
+}
+
+void sendManagementEventSerial(int serial_fd, const string& strType, const json& jsonPayload = json::object())
+{
+    json jsonEvent = jsonPayload;
+    jsonEvent["channel"] = "event";
+    jsonEvent["srcNodeId"] = g_strLocalNodeId;
+    jsonEvent["dstNodeId"] = "pc";
+    jsonEvent["type"] = strType;
+    jsonEvent["role"] = "sender";
+    jsonEvent["timestamp"] = currentTimeMillis();
+
+    writeJsonLineSerial(serial_fd, jsonEvent);
+    printLocalLog("EVENT_TX", "type=" + strType + ", payload=" + jsonPayload.dump());
+}
+
 //利用UDP交换数据，以下是端到端和广播两种通信方式
 bool bSendInitPacket_P2P(const TeslaInitPacket& packet, const string& strIP = "192.168.1.100", int port = 8888) {
     socket_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -283,9 +485,6 @@ long long currentTimeMillis() {
         chrono::system_clock::now().time_since_epoch()).count();
 }
 
-
-//待发送的数据包类数组
-vector<TeslaProtocolPacket> vecTeslaQueue(nTotalKey + nDelay - 1);
 
 //--------------------------------------
 // 判断素数 / 找到 >= x 的最小素数
@@ -616,34 +815,33 @@ void Samd_DSeqAgg(const vector<string>& vecMACs, vector<string>& vecTauOut)
 void sendInitPacketSerial(int serial_fd, const TeslaInitPacket& packet)
 {
     json j = packet.to_json();
-
-    string data = j.dump();
-
-    data += "\n";
-
-    write(serial_fd, data.c_str(), data.size());
+    writeJsonLineSerial(serial_fd, j);
 }
 
 void sendProtocolPacketSerial(int serial_fd, const TeslaProtocolPacket& packet)
 {
     json j = packet.to_json();
-
-    std::string data = j.dump();
-
-    data += "\n";
-
-    write(serial_fd, data.c_str(), data.size());
+    writeJsonLineSerial(serial_fd, j);
 }
 
 void runTeslaAlgorithm(json params, int serial_fd)
 {
-    nDelay = params["keyInterval"];
-    nTotalKey = params["keyCount"];
-    N_GROUP_SIZE = params["groupSize"];
-    N_DECTECING = params["detectCount"];
-    strTESLAInitKey = params["initKey"];
-    strSendmessage = params["sendMsg"];
-    strContext = params["context"];
+    params = jsonNormalizeConfig(params);
+
+    nDelay = nJsonIntValue(params, "keyInterval", nDelay);
+    nTotalKey = nJsonIntValue(params, "keyCount", nTotalKey);
+    N_GROUP_SIZE = nJsonIntValue(params, "groupSize", N_GROUP_SIZE);
+    N_DECTECING = nJsonIntValue(params, "detectCount", N_DECTECING);
+    int nIntervalMs = nJsonIntValue(params, "intervalMs", 1000);
+    strTESLAInitKey = strJsonStringValue(params, "initKey", strTESLAInitKey);
+    strSendmessage = strJsonStringValue(params, "sendMsg", strSendmessage);
+    strContext = strJsonStringValue(params, "context", strContext);
+    printLocalLog("AUTH_START",
+        "N=" + to_string(nTotalKey)
+        + ", d=" + to_string(nDelay)
+        + ", intervalMs=" + to_string(nIntervalMs)
+        + ", groupSize=" + to_string(N_GROUP_SIZE)
+        + ", context=" + strContext);
 
     string strKey0;//单向链计算的最后一个密钥，实际调用的第一个密钥的前一个密钥，在通信的最初阶段发送给接收方用于验证后续披露的密钥
     string strKeyObeject;//当前使用的密钥
@@ -658,6 +856,7 @@ void runTeslaAlgorithm(json params, int serial_fd)
 
 
     vector<string> One_Way_Chain = vec_strGenerateKeyChain(strTESLAInitKey);//密钥链
+    vector<TeslaProtocolPacket> vecTeslaQueue(nTotalKey + nDelay);
     strKey0 = One_Way_Chain[0];
     cout << "Key0 = " << strKey0 << endl;
     // for (int i = 0; i < One_Way_Chain.size(); i++) {
@@ -674,10 +873,23 @@ void runTeslaAlgorithm(json params, int serial_fd)
     cout << "Current Time = " << currentTime << endl;
     string strSenderId = strGenerateSenderId();
     TeslaInitPacket packet{
-        strSenderId, strKey0, "zero", nTotalKey, 1000, nDelay, "SHA256", "SHA256(Ki||context)", strContext, currentTime
+        strSenderId, strKey0, "zero", nTotalKey, nIntervalMs, nDelay, "SHA256", "SHA256(Ki||context)", strContext, currentTime
     };
     //sendInitPacket_P2P(packet, "10.8.12.84", 8888);//ip要替换为接收方ip
     sendInitPacketSerial(serial_fd, packet);
+    printLocalLog("TESLA_INIT_TX",
+        "senderId=" + strSenderId
+        + ", keyCount=" + to_string(nTotalKey)
+        + ", delay=" + to_string(nDelay)
+        + ", intervalMs=" + to_string(nIntervalMs));
+    sendManagementEventSerial(serial_fd, "SENDER_INIT_SENT",
+        {
+            {"senderId", strSenderId},
+            {"keyCount", nTotalKey},
+            {"delay", nDelay},
+            {"intervalMs", nIntervalMs},
+            {"context", strContext}
+        });
 
     /*bSendInitPacket_Broadcast(packet);
     bSendInitPacket_Broadcast(packet, 8888);*/
@@ -685,7 +897,7 @@ void runTeslaAlgorithm(json params, int serial_fd)
 
 
     //将数据包打包完成，为了将所有密钥披露，循环次数应加上密钥延迟披露的时间，delay实际为2，但为保证index和密钥号统一所以设置为3，所以这里有-1操作
-    for (int i = 1; i < nTotalKey + nDelay - 1; ++i) {
+    for (int i = 1; i < nTotalKey + nDelay - 1 && !g_bStopRequested.load(); ++i) {
 
         vecTeslaQueue[i].nIndex = i;
         vecTeslaQueue[i].strSenderId = strSenderId;
@@ -728,15 +940,38 @@ void runTeslaAlgorithm(json params, int serial_fd)
         print_packet(vecTeslaQueue[i]);
 
         sendProtocolPacketSerial(serial_fd, vecTeslaQueue[i]);
+        printLocalLog("TESLA_PACKET_TX",
+            "senderId=" + strSenderId
+            + ", index=" + to_string(vecTeslaQueue[i].nIndex)
+            + ", disclosedKey=" + vecTeslaQueue[i].strDisclosedKey
+            + ", hasTau=" + string(vecTeslaQueue[i].vecSamdTau.empty() ? "false" : "true"));
+        sendManagementEventSerial(serial_fd, "PACKET_SENT",
+            {
+                {"senderId", strSenderId},
+                {"index", vecTeslaQueue[i].nIndex},
+                {"hasTau", !vecTeslaQueue[i].vecSamdTau.empty()},
+                {"disclosedKey", vecTeslaQueue[i].strDisclosedKey == "zero" ? "zero" : "disclosed"}
+            });
         //bSendProtocolPacket_Broadcast(vecTeslaQueue[i]);
         //bSendProtocolPacket_Broadcast(vecTeslaQueue[i], 6666);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 
     }
+
+    sendManagementEventSerial(serial_fd, "AUTH_FINISHED",
+        {
+            {"senderId", strSenderId},
+            {"stopped", g_bStopRequested.load()}
+        });
+    printLocalLog("AUTH_FINISH",
+        "senderId=" + strSenderId
+        + ", stopped=" + string(g_bStopRequested.load() ? "true" : "false"));
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    initLocalNodeId(argc, argv);
+    printLocalLog("BOOT", "sender process starting");
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -750,6 +985,7 @@ int main() {
     if (serial_fd < 0)
     {
         std::cout << "串口打开失败\n";
+        printLocalLog("SERIAL", "open /dev/ttyUSB0 failed");
         return -1;
     }
 
@@ -757,16 +993,11 @@ int main() {
 
     tcgetattr(serial_fd, &tty);
 
-    cfsetispeed(&tty, B57600);
-    cfsetospeed(&tty, B57600);
-
-    tty.c_cflag |= (CLOCAL | CREAD);
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-
-    tcsetattr(serial_fd, TCSANOW, &tty);
+    configSerialRawMode(serial_fd, tty);
+    printLocalLog("SERIAL", "open /dev/ttyUSB0 success, baud=57600, mode=8N1 raw");
 
     char buffer[1024];
+    string strSerialBuffer;
 
     while (true)
     {
@@ -775,22 +1006,131 @@ int main() {
 
         if (n > 0)
         {
-            std::string data(buffer, (size_t)n);
+            string strRawData(buffer, (size_t)n);
+            printLocalLog("RAW_RX",
+                "bytes=" + to_string(n)
+                + ", data=" + strPreviewSerialData(strRawData));
 
-            try
+            strSerialBuffer.append(strRawData);
+
+            size_t nLinePos = string::npos;
+            while ((nLinePos = strSerialBuffer.find('\n')) != string::npos)
             {
+                string strLine = strSerialBuffer.substr(0, nLinePos);
+                strSerialBuffer.erase(0, nLinePos + 1);
+                printLocalLog("LINE_RX", strPreviewSerialData(strLine));
 
-                json params = json::parse(data);
+                if (strLine.empty())
+                {
+                    continue;
+                }
 
-                std::cout << "收到参数\n";
+                try
+                {
+                    json jsonMessage = json::parse(strLine);
 
-                runTeslaAlgorithm(params, serial_fd);
+                    if (!bIsManagementMessage(jsonMessage) || !bMessageForLocalNode(jsonMessage))
+                    {
+                        printLocalLog("MGMT_RX",
+                            "ignored message, localNodeId=" + g_strLocalNodeId
+                            + ", message=" + jsonMessage.dump());
+                        continue;
+                    }
+
+                    if (bIsMessageType(jsonMessage, "PING"))
+                    {
+                        printLocalLog("MGMT_RX", "PING seq=" + to_string(jsonMessage.value("seq", 0)));
+                        waitBeforeBroadcastReply(jsonMessage);
+                        sendManagementEventSerial(serial_fd, "PONG",
+                            {
+                                {"senderId", g_strLocalNodeId},
+                                {"seq", jsonMessage.value("seq", 0)},
+                                {"pcTimestampMs", jsonMessage.value("pcTimestampMs", 0LL)},
+                                {"serverTimestampMs", currentTimeMillis()}
+                            });
+                    }
+                    else if (bIsMessageType(jsonMessage, "CONFIG"))
+                    {
+                        g_jsonLastConfig = jsonNormalizeConfig(jsonMessage);
+                        g_bHasConfig = true;
+                        printLocalLog("MGMT_RX", "CONFIG accepted: " + g_jsonLastConfig.dump());
+                        sendManagementEventSerial(serial_fd, "CONFIG_ACK",
+                            {
+                                {"senderId", g_strLocalNodeId},
+                                {"message", "sender config accepted"}
+                            });
+                    }
+                    else if (bIsMessageType(jsonMessage, "START"))
+                    {
+                        if (!g_bHasConfig)
+                        {
+                            printLocalLog("MGMT_RX", "START ignored, config missing");
+                            sendManagementEventSerial(serial_fd, "LOG",
+                                {
+                                    {"level", "WARN"},
+                                    {"message", "start ignored, config missing"}
+                                });
+                            continue;
+                        }
+
+                        if (g_bTeslaRunning.load())
+                        {
+                            printLocalLog("MGMT_RX", "START ignored, tesla is already running");
+                            sendManagementEventSerial(serial_fd, "LOG",
+                                {
+                                    {"level", "WARN"},
+                                    {"message", "start ignored, tesla is already running"}
+                                });
+                            continue;
+                        }
+
+                        json jsonRunConfig = g_jsonLastConfig;
+                        g_bStopRequested.store(false);
+                        printLocalLog("MGMT_RX", "START accepted");
+                        thread thTesla([jsonRunConfig, serial_fd]
+                            {
+                                g_bTeslaRunning.store(true);
+                                runTeslaAlgorithm(jsonRunConfig, serial_fd);
+                                g_bTeslaRunning.store(false);
+                            });
+                        thTesla.detach();
+                    }
+                    else if (bIsMessageType(jsonMessage, "STOP"))
+                    {
+                        g_bStopRequested.store(true);
+                        printLocalLog("MGMT_RX", "STOP accepted");
+                        sendManagementEventSerial(serial_fd, "LOG",
+                            {
+                                {"level", "INFO"},
+                                {"message", "stop requested"}
+                            });
+                    }
+                    else
+                    {
+                        printLocalLog("MGMT_RX", "unsupported message: " + jsonMessage.dump());
+                        sendManagementEventSerial(serial_fd, "LOG",
+                            {
+                                {"level", "WARN"},
+                                {"senderId", g_strLocalNodeId},
+                                {"message", "ignored unsupported management message"}
+                            });
+                    }
+                }
+                catch (...)
+                {
+                    std::cout << "JSON解析失败\n";
+                    printLocalLog("JSON_RX", "parse failed, line=" + strPreviewSerialData(strLine));
+                    sendManagementEventSerial(serial_fd, "LOG",
+                        {
+                            {"level", "ERROR"},
+                            {"message", "json parse failed"}
+                        });
+                }
             }
-            catch (...)
-            {
-
-                std::cout << "JSON解析失败\n";
-            }
+        }
+        else if (n < 0)
+        {
+            printLocalLog("SERIAL", "read failed: " + string(strerror(errno)));
         }
     }
 
