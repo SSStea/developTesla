@@ -44,6 +44,8 @@ int nTotalKey = 101;
 
 int N_GROUP_SIZE = 100;
 int N_DECTECING = 1;
+int nLossRatePercent = 0;
+int nTamperCountPerGroup = 0;
 
 string strTESLAInitKey = "Hello World";
 string strSendmessage = "TESLA Protocol";
@@ -347,7 +349,11 @@ void writeJsonLineSerial(int serial_fd, const json& jsonMessage)
     strData += "\n";
 
     lock_guard<mutex> lockSerial(g_mtxSerialWrite);
-    write(serial_fd, strData.c_str(), strData.size());
+    ssize_t nWriteLen = write(serial_fd, strData.c_str(), strData.size());
+    if (nWriteLen < 0)
+    {
+        printLocalLog("SERIAL", "write failed: " + string(strerror(errno)));
+    }
 }
 
 void sendManagementEventSerial(int serial_fd, const string& strType, const json& jsonPayload = json::object())
@@ -709,6 +715,137 @@ void sendProtocolPacketSerial(int serial_fd, const TeslaProtocolPacket& packet)
     writeJsonLineSerial(serial_fd, j);
 }
 
+vector<int> vecBuildInjectableIndexes(const vector<TeslaProtocolPacket>& vecTeslaQueue)
+{
+    vector<int> vecIndexes;
+    for (int nIndex = 1; nIndex < nTotalKey; ++nIndex)
+    {
+        if (nIndex >= static_cast<int>(vecTeslaQueue.size()))
+        {
+            break;
+        }
+
+        const TeslaProtocolPacket& packet = vecTeslaQueue[nIndex];
+        if (!packet.strMessage.empty() && packet.vecSamdTau.empty())
+        {
+            vecIndexes.push_back(nIndex);
+        }
+    }
+
+    return vecIndexes;
+}
+
+vector<int> vecSelectIndexesForLoss(const vector<TeslaProtocolPacket>& vecTeslaQueue, int nLossPercent)
+{
+    vector<int> vecSelectedIndexes;
+    vector<int> vecCandidateIndexes = vecBuildInjectableIndexes(vecTeslaQueue);
+    if (nLossPercent <= 0 || vecCandidateIndexes.empty())
+    {
+        return vecSelectedIndexes;
+    }
+
+    int nLossCount = static_cast<int>((static_cast<long long>(vecCandidateIndexes.size()) * nLossPercent + 50) / 100);
+    nLossCount = min(nLossCount, static_cast<int>(vecCandidateIndexes.size()));
+    if (nLossCount <= 0)
+    {
+        return vecSelectedIndexes;
+    }
+
+    int nGroupCount = (nTotalKey - 1 + N_GROUP_SIZE - 1) / N_GROUP_SIZE;
+    vector<vector<int>> vecGroupCandidates(nGroupCount);
+    for (int nIndex : vecCandidateIndexes)
+    {
+        int nGroupIndex = (nIndex - 1) / N_GROUP_SIZE;
+        if (nGroupIndex >= 0 && nGroupIndex < nGroupCount)
+        {
+            vecGroupCandidates[nGroupIndex].push_back(nIndex);
+        }
+    }
+
+    random_device rdDevice;
+    mt19937 mtGenerator(rdDevice());
+    for (vector<int>& vecGroupIndexes : vecGroupCandidates)
+    {
+        shuffle(vecGroupIndexes.begin(), vecGroupIndexes.end(), mtGenerator);
+    }
+
+    while (static_cast<int>(vecSelectedIndexes.size()) < nLossCount)
+    {
+        bool bAdded = false;
+        for (vector<int>& vecGroupIndexes : vecGroupCandidates)
+        {
+            if (vecGroupIndexes.empty())
+            {
+                continue;
+            }
+
+            vecSelectedIndexes.push_back(vecGroupIndexes.back());
+            vecGroupIndexes.pop_back();
+            bAdded = true;
+            if (static_cast<int>(vecSelectedIndexes.size()) >= nLossCount)
+            {
+                break;
+            }
+        }
+
+        if (!bAdded)
+        {
+            break;
+        }
+    }
+
+    sort(vecSelectedIndexes.begin(), vecSelectedIndexes.end());
+    return vecSelectedIndexes;
+}
+
+vector<int> vecSelectIndexesForTamper(const vector<TeslaProtocolPacket>& vecTeslaQueue, int nTamperCount)
+{
+    vector<int> vecSelectedIndexes;
+    if (nTamperCount <= 0)
+    {
+        return vecSelectedIndexes;
+    }
+
+    int nGroupCount = (nTotalKey - 1 + N_GROUP_SIZE - 1) / N_GROUP_SIZE;
+    random_device rdDevice;
+    mt19937 mtGenerator(rdDevice());
+
+    for (int nGroupIndex = 0; nGroupIndex < nGroupCount; ++nGroupIndex)
+    {
+        vector<int> vecGroupIndexes;
+        int nStartIndex = nGroupIndex * N_GROUP_SIZE + 1;
+        int nEndIndex = min(nTotalKey - 1, (nGroupIndex + 1) * N_GROUP_SIZE);
+        for (int nIndex = nStartIndex; nIndex <= nEndIndex; ++nIndex)
+        {
+            if (nIndex >= static_cast<int>(vecTeslaQueue.size()))
+            {
+                break;
+            }
+
+            const TeslaProtocolPacket& packet = vecTeslaQueue[nIndex];
+            if (!packet.strMessage.empty() && packet.vecSamdTau.empty())
+            {
+                vecGroupIndexes.push_back(nIndex);
+            }
+        }
+
+        shuffle(vecGroupIndexes.begin(), vecGroupIndexes.end(), mtGenerator);
+        int nSelectedCount = min(nTamperCount, static_cast<int>(vecGroupIndexes.size()));
+        for (int nIndex = 0; nIndex < nSelectedCount; ++nIndex)
+        {
+            vecSelectedIndexes.push_back(vecGroupIndexes[nIndex]);
+        }
+    }
+
+    sort(vecSelectedIndexes.begin(), vecSelectedIndexes.end());
+    return vecSelectedIndexes;
+}
+
+bool bContainsIndex(const vector<int>& vecIndexes, int nIndex)
+{
+    return binary_search(vecIndexes.begin(), vecIndexes.end(), nIndex);
+}
+
 void runTeslaAlgorithm(json params, int serial_fd)
 {
     params = jsonNormalizeConfig(params);
@@ -717,6 +854,10 @@ void runTeslaAlgorithm(json params, int serial_fd)
     nTotalKey = nJsonIntValue(params, "keyCount", nTotalKey);
     N_GROUP_SIZE = nJsonIntValue(params, "groupSize", N_GROUP_SIZE);
     N_DECTECING = nJsonIntValue(params, "detectCount", N_DECTECING);
+    nLossRatePercent = nJsonIntValue(params, "lossRatePercent", 0);
+    nTamperCountPerGroup = nJsonIntValue(params, "tamperCountPerGroup", 0);
+    nLossRatePercent = max(0, min(100, nLossRatePercent));
+    nTamperCountPerGroup = max(0, nTamperCountPerGroup);
     int nIntervalMs = nJsonIntValue(params, "intervalMs", 1000);
     strTESLAInitKey = strJsonStringValue(params, "initKey", strTESLAInitKey);
     strSendmessage = strJsonStringValue(params, "sendMsg", strSendmessage);
@@ -726,6 +867,8 @@ void runTeslaAlgorithm(json params, int serial_fd)
         + ", d=" + to_string(nDelay)
         + ", intervalMs=" + to_string(nIntervalMs)
         + ", groupSize=" + to_string(N_GROUP_SIZE)
+        + ", lossRatePercent=" + to_string(nLossRatePercent)
+        + ", tamperCountPerGroup=" + to_string(nTamperCountPerGroup)
         + ", context=" + strContext);
 
     string strKey0;//单向链计算的最后一个密钥，实际调用的第一个密钥的前一个密钥，在通信的最初阶段发送给接收方用于验证后续披露的密钥
@@ -779,8 +922,8 @@ void runTeslaAlgorithm(json params, int serial_fd)
     this_thread::sleep_for(chrono::seconds(1));
 
 
-    //将数据包打包完成，为了将所有密钥披露，循环次数应加上密钥延迟披露的时间，delay实际为2，但为保证index和密钥号统一所以设置为3，所以这里有-1操作
-    for (int i = 1; i < nTotalKey + nDelay - 1 && !g_bStopRequested.load(); ++i) {
+    int nPacketEndIndex = nTotalKey + nDelay - 1;
+    for (int i = 1; i < nPacketEndIndex; ++i) {
 
         vecTeslaQueue[i].nIndex = i;
         vecTeslaQueue[i].strSenderId = strSenderId;
@@ -812,23 +955,75 @@ void runTeslaAlgorithm(json params, int serial_fd)
             //vecTeslaQueue[i].strMac = strMessageMAC;
             vecTeslaQueue[i].strMessage = strSendmessage + to_string(i);
         }
-        else {
+        else
+        {
             vecTeslaQueue[i].strDisclosedKey = One_Way_Chain[i - 2];
             vecTeslaQueue[i].strMessage = "";
             //vecTeslaQueue[i].strMac = "";
         }
+    }
+
+    vector<int> vecLossIndexes = vecSelectIndexesForLoss(vecTeslaQueue, nLossRatePercent);
+    vector<int> vecTamperIndexes = vecSelectIndexesForTamper(vecTeslaQueue, nTamperCountPerGroup);
+    vecTamperIndexes.erase(remove_if(vecTamperIndexes.begin(), vecTamperIndexes.end(),
+        [&vecLossIndexes](int nIndex)
+        {
+            return bContainsIndex(vecLossIndexes, nIndex);
+        }), vecTamperIndexes.end());
+
+    printLocalLog("FAULT_INJECT",
+        "lossRatePercent=" + to_string(nLossRatePercent)
+        + ", lossCount=" + to_string(static_cast<int>(vecLossIndexes.size()))
+        + ", tamperCountPerGroup=" + to_string(nTamperCountPerGroup)
+        + ", tamperCount=" + to_string(static_cast<int>(vecTamperIndexes.size())));
+    sendManagementEventSerial(serial_fd, "FAULT_PLAN",
+        {
+            {"senderId", strSenderId},
+            {"lossRatePercent", nLossRatePercent},
+            {"lossCount", static_cast<int>(vecLossIndexes.size())},
+            {"tamperCountPerGroup", nTamperCountPerGroup},
+            {"tamperCount", static_cast<int>(vecTamperIndexes.size())}
+        });
+
+    //将数据包打包完成，为了将所有密钥披露，循环次数应加上密钥延迟披露的时间，delay实际为2，但为保证index和密钥号统一所以设置为3，所以这里有-1操作
+    for (int i = 1; i < nPacketEndIndex && !g_bStopRequested.load(); ++i) {
+        bool bDropped = bContainsIndex(vecLossIndexes, i);
+        bool bTampered = bContainsIndex(vecTamperIndexes, i) && !bDropped;
+
+        if (bTampered)
+        {
+            vecTeslaQueue[i].strMessage += "_tampered";
+        }
+
+        if (bDropped)
+        {
+            printLocalLog("DROP_INJECT",
+                "senderId=" + strSenderId
+                + ", index=" + to_string(vecTeslaQueue[i].nIndex));
+            sendManagementEventSerial(serial_fd, "PACKET_DROPPED",
+                {
+                    {"senderId", strSenderId},
+                    {"index", vecTeslaQueue[i].nIndex},
+                    {"reason", "loss_inject"}
+                });
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
         sendProtocolPacketSerial(serial_fd, vecTeslaQueue[i]);
         printLocalLog("TESLA_PACKET_TX",
             "senderId=" + strSenderId
             + ", index=" + to_string(vecTeslaQueue[i].nIndex)
             + ", disclosedKey=" + vecTeslaQueue[i].strDisclosedKey
-            + ", hasTau=" + string(vecTeslaQueue[i].vecSamdTau.empty() ? "false" : "true"));
+            + ", hasTau=" + string(vecTeslaQueue[i].vecSamdTau.empty() ? "false" : "true")
+            + ", tampered=" + string(bTampered ? "true" : "false"));
         sendManagementEventSerial(serial_fd, "PACKET_SENT",
             {
                 {"senderId", strSenderId},
                 {"index", vecTeslaQueue[i].nIndex},
                 {"hasTau", !vecTeslaQueue[i].vecSamdTau.empty()},
-                {"disclosedKey", vecTeslaQueue[i].strDisclosedKey == "zero" ? "zero" : "disclosed"}
+                {"disclosedKey", vecTeslaQueue[i].strDisclosedKey == "zero" ? "zero" : "disclosed"},
+                {"tampered", bTampered}
             });
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 

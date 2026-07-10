@@ -369,7 +369,11 @@ void writeJsonLineSerial(int nSerialFd, const json& jsonMessage)
     strData += "\n";
 
     lock_guard<mutex> lockSerial(g_mtxSerialWrite);
-    write(nSerialFd, strData.c_str(), strData.size());
+    ssize_t nWriteLen = write(nSerialFd, strData.c_str(), strData.size());
+    if (nWriteLen < 0)
+    {
+        printLocalLog("SERIAL", "write failed: " + string(strerror(errno)));
+    }
 }
 
 void sendManagementEventSerial(const string& strType, const json& jsonPayload = json::object())
@@ -1012,9 +1016,12 @@ static bool bVerifyGroupSAMD(
     GroupBucket& gb,
     const vector<string>& vecTauRecv,
     vector<int>& vecGoodSlots,
-    vector<int>& vecBadSlots
+    vector<int>& vecBadSlots,
+    bool& bOverDetectCapacity
 )
 {
+    bOverDetectCapacity = false;
+
     // 1) 从 group 中抽出有完整信息的 slot，并重算 MAC
     vector<int> vecSlotIds;      // 映射：位置 j -> 全局 slot 编号
     vector<string> vecTags;      // t_j = MAC(m_j, k_j)
@@ -1044,11 +1051,6 @@ static bool bVerifyGroupSAMD(
     vector<int> goodPos;
     vector<int> badPos;
     long long nBadSlotCnt = Samd_DSAVrfy(vecTags, vecTauRecv, goodPos, badPos);
-    if (nBadSlotCnt > N_DECTECING)
-    {
-        cout << "The current network environment is poor，lost packet is over DECTECING" << endl;
-        return false;
-    }
 
     vecGoodSlots.clear();
     vecBadSlots.clear();
@@ -1067,6 +1069,13 @@ static bool bVerifyGroupSAMD(
         if (pos >= 0 && pos < (int)vecSlotIds.size()) {
             vecBadSlots.push_back(vecSlotIds[pos]);
         }
+    }
+
+    if (nBadSlotCnt > N_DECTECING)
+    {
+        bOverDetectCapacity = true;
+        cout << "The current network environment is poor，lost packet is over DECTECING" << endl;
+        return false;
     }
 
     // 简单日志
@@ -1133,6 +1142,7 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
 
     vector<int> vecGoodSlots;
     vector<int> vecBadSlots;
+    bool bOverDetectCapacity = false;
     shared_ptr<SReceiverContext> pCtx = GetOrCreateCtx(strSenderId);
     int nGroupStartIndex = (nGroupId - 1) * N_GROUP_SIZE + N_BASE_SLOT;
     int nGroupEndIndex = nGroupId * N_GROUP_SIZE;
@@ -1144,7 +1154,13 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
     int nReceivedCount = nExpectedCount > 0 ? nCountReceivedPacketsInRange(*pCtx, nGroupStartIndex, nGroupEndIndex) : static_cast<int>(gb.items.size());
     int nGroupLossCount = nExpectedCount > nReceivedCount ? nExpectedCount - nReceivedCount : 0;
     //const bool bOk = bVerifyGroupSa2(group_id, gb);
-    const bool bOk = bVerifyGroupSAMD(nGroupId, gb, vecRecvTau, vecGoodSlots, vecBadSlots);
+    const bool bOk = bVerifyGroupSAMD(nGroupId, gb, vecRecvTau, vecGoodSlots, vecBadSlots, bOverDetectCapacity);
+    json jsonBadSlots = json::array();
+    for (int nBadSlot : vecBadSlots)
+    {
+        jsonBadSlots.push_back(nBadSlot);
+    }
+
     printLocalLog("GROUP_VERIFY",
         "senderId=" + strSenderId
         + ", group=" + to_string(nGroupId)
@@ -1153,6 +1169,7 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
         + ", valid=" + to_string(static_cast<int>(vecGoodSlots.size()))
         + ", failed=" + to_string(static_cast<int>(vecBadSlots.size()))
         + ", loss=" + to_string(nGroupLossCount)
+        + ", overDetectCapacity=" + string(bOverDetectCapacity ? "true" : "false")
         + ", result=" + string(bOk ? "PASS" : "FAIL"));
     sendManagementEventSerial("GROUP_RESULT",
         {
@@ -1162,8 +1179,10 @@ static void FlushGroup(string strSenderId, int nGroupId, const vector<string>& v
             {"received", nReceivedCount},
             {"valid", static_cast<int>(vecGoodSlots.size())},
             {"failed", static_cast<int>(vecBadSlots.size())},
+            {"badSlots", jsonBadSlots},
             {"loss", nGroupLossCount},
             {"cumulativeLoss", pCtx->nLossPacketCount},
+            {"overDetectCapacity", bOverDetectCapacity},
             {"result", bOk}
         });
 
@@ -1410,6 +1429,7 @@ static void HandlePacketForSender(const string& strSenderId, const TeslaProtocol
             );
         }
 
+        FlushGroup(strSenderId, pCtx->nGroupCnt, pCtx->vecSamdTau);
         pCtx->nLastTauIndex = pCtx->nRecvTauIndex;
     }
 }
